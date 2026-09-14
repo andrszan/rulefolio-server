@@ -156,6 +156,10 @@ def _workspace_error(error: Exception) -> None:
         ) from error
     if isinstance(error, service.WorkspaceMemberUnavailable):
         raise api_error(404, "成员不可用", "workspace_member_unavailable") from error
+    if isinstance(error, service.WorkspaceMemberLastMaintainerRequired):
+        raise api_error(
+            409, "作品至少需要一名维护者", "work_last_maintainer_required"
+        ) from error
     if isinstance(error, service.WorkspaceInvitationUnavailable):
         raise api_error(
             400, "此邀请不能继续使用", "workspace_invitation_unavailable"

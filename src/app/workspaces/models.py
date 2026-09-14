@@ -2,8 +2,10 @@ from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Integer,
     LargeBinary,
@@ -33,6 +35,38 @@ class Workspace(Base):
         nullable=False,
     )
     created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class WorkAccess(Base):
+    __tablename__ = "work_accesses"
+    __table_args__ = (
+        CheckConstraint(
+            "role IN ('maintainer', 'organizer', 'collaborator')",
+            name="ck_work_access_role",
+        ),
+        ForeignKeyConstraint(
+            ["work_id", "workspace_id"],
+            ["works.id", "works.workspace_id"],
+            ondelete="CASCADE",
+        ),
+        Index("ix_work_accesses_account_work", "account_id", "work_id"),
+    )
+
+    work_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True
+    )
+    workspace_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), nullable=False
+    )
+    account_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("identity_accounts.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    role: Mapped[str] = mapped_column(String(16), nullable=False)
+    granted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 

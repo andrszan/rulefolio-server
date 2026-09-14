@@ -2,13 +2,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.access.context import (
     set_invitation_credential,
     set_maintenance_workspace_scope,
+    set_work_access_cleanup_scope,
     set_workspace_management_scope,
 )
 from app.audit.models import SecurityAudit
@@ -18,6 +19,7 @@ from app.identity.models import Account, OneTimeCredential
 from app.notifications.models import MailOutbox
 from app.notifications.service import clear_outbox_envelopes, enqueue_token_mail
 from app.workspaces.models import (
+    WorkAccess,
     Workspace,
     WorkspaceInvitation,
     WorkspaceInvitationAttempt,
@@ -57,6 +59,10 @@ class WorkspaceMemberUnavailable(Exception):
     pass
 
 
+class WorkspaceMemberLastMaintainerRequired(Exception):
+    pass
+
+
 class WorkspaceInvitationUnavailable(Exception):
     pass
 
@@ -91,6 +97,19 @@ class WorkspaceMemberData:
 
 
 @dataclass(frozen=True)
+class WorkAccessRecord:
+    account_id: UUID
+    role: str
+
+
+@dataclass(frozen=True)
+class WorkAccessMemberRecord:
+    account_id: UUID
+    email: str
+    role: str | None
+
+
+@dataclass(frozen=True)
 class WorkspaceInvitationData:
     id: UUID
     email: str
@@ -104,6 +123,132 @@ class InvitationExchangeResult:
     workspace: WorkspaceData
     login_required: bool = False
     session_result: identity_service.SessionResult | None = None
+
+
+def has_workspace_member(
+    session: Session, workspace_id: UUID, account_id: UUID
+) -> bool:
+    return (
+        session.scalar(
+            select(WorkspaceMember.id).where(
+                WorkspaceMember.workspace_id == workspace_id,
+                WorkspaceMember.account_id == account_id,
+            )
+        )
+        is not None
+    )
+
+
+def work_access_role(session: Session, work_id: UUID, account_id: UUID) -> str | None:
+    return session.scalar(
+        select(WorkAccess.role).where(
+            WorkAccess.work_id == work_id, WorkAccess.account_id == account_id
+        )
+    )
+
+
+def work_access_roles_subquery(account_id: UUID):
+    return (
+        select(WorkAccess.work_id.label("work_id"), WorkAccess.role.label("role"))
+        .where(WorkAccess.account_id == account_id)
+        .subquery()
+    )
+
+
+def lock_work_members(
+    session: Session, workspace_id: UUID, account_ids: set[UUID]
+) -> frozenset[UUID]:
+    return frozenset(
+        session.scalars(
+            select(WorkspaceMember.account_id)
+            .where(
+                WorkspaceMember.workspace_id == workspace_id,
+                WorkspaceMember.account_id.in_(account_ids),
+            )
+            .order_by(WorkspaceMember.account_id)
+            .with_for_update()
+        )
+    )
+
+
+def lock_work_accesses(session: Session, work_id: UUID) -> list[WorkAccessRecord]:
+    return [
+        WorkAccessRecord(account_id=account_id, role=role)
+        for account_id, role in session.execute(
+            select(WorkAccess.account_id, WorkAccess.role)
+            .where(WorkAccess.work_id == work_id)
+            .order_by(WorkAccess.account_id)
+            .with_for_update()
+        )
+    ]
+
+
+def add_work_access(
+    session: Session,
+    work_id: UUID,
+    workspace_id: UUID,
+    account_id: UUID,
+    role: str,
+) -> None:
+    session.add(
+        WorkAccess(
+            work_id=work_id,
+            workspace_id=workspace_id,
+            account_id=account_id,
+            role=role,
+        )
+    )
+
+
+def update_work_access_role(
+    session: Session, work_id: UUID, account_id: UUID, role: str
+) -> None:
+    session.execute(
+        update(WorkAccess)
+        .where(WorkAccess.work_id == work_id, WorkAccess.account_id == account_id)
+        .values(role=role)
+    )
+
+
+def delete_work_access(session: Session, work_id: UUID, account_id: UUID) -> None:
+    session.execute(
+        delete(WorkAccess).where(
+            WorkAccess.work_id == work_id, WorkAccess.account_id == account_id
+        )
+    )
+
+
+def list_work_access_members(
+    session: Session, workspace_id: UUID, work_id: UUID, page: int, size: int
+) -> tuple[list[WorkAccessMemberRecord], int]:
+    total = (
+        session.scalar(
+            select(func.count())
+            .select_from(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id == workspace_id)
+        )
+        or 0
+    )
+    rows = session.execute(
+        select(WorkspaceMember.account_id, Account.email, WorkAccess.role)
+        .join(Account, Account.id == WorkspaceMember.account_id)
+        .outerjoin(
+            WorkAccess,
+            (WorkAccess.work_id == work_id)
+            & (WorkAccess.account_id == WorkspaceMember.account_id),
+        )
+        .where(WorkspaceMember.workspace_id == workspace_id)
+        .order_by(WorkspaceMember.joined_at, WorkspaceMember.account_id)
+        .offset((page - 1) * size)
+        .limit(size)
+    )
+    return (
+        [
+            WorkAccessMemberRecord(account_id=account_id, email=email, role=role)
+            for account_id, email, role in rows
+        ],
+        total,
+    )
 
 
 def _now() -> datetime:
@@ -684,6 +829,45 @@ def remove_member(
             session.rollback()
             raise WorkspaceMemberUnavailable
 
+        set_work_access_cleanup_scope(session, workspace.id)
+        work_ids = list(
+            session.scalars(
+                select(WorkAccess.work_id)
+                .where(WorkAccess.account_id == account_id)
+                .order_by(WorkAccess.work_id)
+            )
+        )
+        for work_id in work_ids:
+            accesses = list(
+                session.scalars(
+                    select(WorkAccess)
+                    .where(WorkAccess.work_id == work_id)
+                    .order_by(WorkAccess.account_id)
+                    .with_for_update()
+                )
+            )
+            target_access = next(
+                (access for access in accesses if access.account_id == account_id),
+                None,
+            )
+            if target_access is None:
+                continue
+            if (
+                target_access.role == "maintainer"
+                and sum(access.role == "maintainer" for access in accesses) == 1
+            ):
+                session.rollback()
+                raise WorkspaceMemberLastMaintainerRequired
+            session.delete(target_access)
+            session.add(
+                SecurityAudit(
+                    action="work_access_revoked",
+                    actor_account_id=actor_account_id,
+                    target_account_id=account_id,
+                    scope=f"workspace:{workspace.id}/work:{work_id}",
+                )
+            )
+
         candidates = list(
             session.execute(
                 select(WorkspaceInvitation.id, WorkspaceInvitation.credential_id).where(
@@ -734,7 +918,11 @@ def remove_member(
             )
         )
         _commit_or_rollback(session)
-    except (WorkspaceMemberUnavailable, WorkspaceOwnerCannotBeRemoved):
+    except (
+        WorkspaceMemberLastMaintainerRequired,
+        WorkspaceMemberUnavailable,
+        WorkspaceOwnerCannotBeRemoved,
+    ):
         raise
     except SQLAlchemyError as error:
         session.rollback()
