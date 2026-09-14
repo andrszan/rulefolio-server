@@ -26,6 +26,7 @@ class MailOutbox(Base):
         nullable=False,
     )
     purpose: Mapped[str] = mapped_column(String(32), nullable=False)
+    workspace_name: Mapped[str | None] = mapped_column(String(160))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     claim_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     token_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)

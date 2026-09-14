@@ -6,12 +6,15 @@ from email.message import EmailMessage
 from uuid import UUID, uuid4
 
 from sqlalchemy import select, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.access.context import set_invitation_credential
 from app.core.config import settings
 from app.identity.models import Account, OneTimeCredential
 from app.notifications.models import MailOutbox
 from app.notifications.service import decrypt_token
+from app.workspaces.models import WorkspaceInvitation
 
 
 @dataclass(frozen=True)
@@ -25,19 +28,30 @@ def _now() -> datetime:
     return datetime.now(UTC)
 
 
-def _message_content(purpose: str, token: str) -> tuple[str, str]:
+def _message_content(
+    purpose: str, token: str, workspace_name: str | None = None
+) -> tuple[str, str]:
     if purpose == "account_activation":
         subject = "设置好玩实验室账户密码"
         path = "/auth/activate"
         action = "设置密码并激活账户"
-    else:
+        body_prefix = ""
+    elif purpose == "password_recovery":
         subject = "恢复好玩实验室账户"
         path = "/auth/reset"
         action = "更新密码"
+        body_prefix = ""
+    elif purpose == "workspace_invitation" and workspace_name:
+        subject = "加入好玩实验室工作空间"
+        path = "/auth/invitation"
+        action = "继续加入工作空间"
+        body_prefix = f"你受邀加入工作空间“{workspace_name}”。\n"
+    else:
+        raise ValueError("邮件用途或显示参数不可用")
     link = f"{settings.app_public_url.rstrip('/')}{path}#token={token}"
     return (
         subject,
-        f"请在有效期内打开以下链接{action}：\n{link}\n\n如果不是你本人发起的操作，请忽略此邮件。",
+        f"{body_prefix}请在有效期内打开以下链接{action}：\n{link}\n\n如果不是你本人发起的操作，请忽略此邮件。",
     )
 
 
@@ -209,7 +223,7 @@ def _mark_unknown(session: Session, claim: DispatchClaim) -> bool:
     )
 
 
-def dispatch_one(session: Session) -> str | None:
+def _dispatch_one(session: Session) -> str | None:
     claim = _claim_next(session)
     if claim is None:
         return None
@@ -217,25 +231,48 @@ def dispatch_one(session: Session) -> str | None:
     outbox = _load_claim(session, claim)
     if outbox is None:
         return "superseded"
-    credential = session.get(OneTimeCredential, outbox.credential_id)
+    credential = session.scalar(
+        select(OneTimeCredential)
+        .where(OneTimeCredential.id == outbox.credential_id)
+        .with_for_update()
+    )
     account = session.get(Account, outbox.recipient_account_id)
+    invitation: WorkspaceInvitation | None = None
+    if credential is not None and outbox.purpose == "workspace_invitation":
+        set_invitation_credential(session, credential.id)
+        invitation = session.scalar(
+            select(WorkspaceInvitation)
+            .where(WorkspaceInvitation.credential_id == credential.id)
+            .with_for_update()
+        )
     if (
         credential is None
         or account is None
+        or credential.purpose != outbox.purpose
+        or credential.status != "active"
+        or credential.expires_at <= _now()
         or (
             outbox.purpose == "account_activation"
             and account.status != "pending_activation"
         )
         or (outbox.purpose == "password_recovery" and account.status != "active")
-        or credential.status != "active"
-        or credential.expires_at <= _now()
+        or (
+            outbox.purpose == "workspace_invitation"
+            and (
+                invitation is None
+                or invitation.status != "active"
+                or invitation.account_id != account.id
+                or account.status not in {"active", "pending_activation"}
+                or not outbox.workspace_name
+            )
+        )
     ):
         _mark_ineligible(session, claim)
         return "cancelled"
 
     try:
         token = decrypt_token(outbox)
-        subject, body = _message_content(outbox.purpose, token)
+        subject, body = _message_content(outbox.purpose, token, outbox.workspace_name)
     except Exception:
         _mark_ineligible(session, claim)
         return "cancelled"
@@ -253,3 +290,11 @@ def dispatch_one(session: Session) -> str | None:
             "pending" if claim.attempt_count < settings.mail_max_attempts else "failed"
         )
     return "accepted" if _mark_accepted(session, claim) else "superseded"
+
+
+def dispatch_one(session: Session) -> str | None:
+    try:
+        return _dispatch_one(session)
+    except SQLAlchemyError:
+        session.rollback()
+        return "retryable"

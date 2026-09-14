@@ -14,7 +14,12 @@ def _associated_data(credential_id: UUID, purpose: str) -> bytes:
 
 
 def enqueue_token_mail(
-    session: Session, credential_id: UUID, account_id: UUID, purpose: str, token: str
+    session: Session,
+    credential_id: UUID,
+    account_id: UUID,
+    purpose: str,
+    token: str,
+    workspace_name: str | None = None,
 ) -> MailOutbox:
     nonce = os.urandom(12)
     ciphertext = AESGCM(settings.token_encryption_key_bytes).encrypt(
@@ -26,6 +31,7 @@ def enqueue_token_mail(
         credential_id=credential_id,
         recipient_account_id=account_id,
         purpose=purpose,
+        workspace_name=workspace_name,
         token_ciphertext=ciphertext,
         token_nonce=nonce,
         key_version=settings.token_encryption_key_version,

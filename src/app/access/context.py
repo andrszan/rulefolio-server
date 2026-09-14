@@ -4,8 +4,24 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 
-def set_actor(session: Session, account_id: UUID) -> None:
+def _set_scope(session: Session, name: str, value: UUID) -> None:
     session.execute(
-        text("SELECT set_config('app.actor_id', :account_id, true)"),
-        {"account_id": str(account_id)},
+        text("SELECT set_config(:name, :value, true)"),
+        {"name": name, "value": str(value)},
     )
+
+
+def set_actor(session: Session, account_id: UUID) -> None:
+    _set_scope(session, "app.actor_id", account_id)
+
+
+def set_invitation_credential(session: Session, credential_id: UUID) -> None:
+    _set_scope(session, "app.invitation_credential_id", credential_id)
+
+
+def set_workspace_management_scope(session: Session, workspace_id: UUID) -> None:
+    _set_scope(session, "app.workspace_management_id", workspace_id)
+
+
+def set_maintenance_workspace_scope(session: Session, workspace_id: UUID) -> None:
+    _set_scope(session, "app.maintenance_workspace_id", workspace_id)

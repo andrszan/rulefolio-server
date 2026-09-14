@@ -2,7 +2,7 @@
 
 本仓库是好玩实验室（`rulefolio`）的 API 服务，使用 FastAPI、同步 SQLAlchemy 2.x、Psycopg 3、PostgreSQL、Alembic、Pydantic v2、pytest 和 Ruff。
 
-当前已提供应用配置、数据库连接、请求日志、错误响应、CORS、`/health`、`/ready`，以及账户开通、Argon2id 密码、opaque session、恢复凭据、Outbox 和 SMTP 派发能力。工作空间、作品、版本、场次、反馈、问题、权限和文件能力尚未实现。
+当前已提供应用配置、数据库连接、请求日志、错误响应、CORS、`/health`、`/ready`，以及账户开通、Argon2id 密码、opaque session、恢复凭据、Outbox 和 SMTP 派发能力；还包括私有工作空间、成员、邮件邀请及邀请兑换。作品、版本、场次、反馈、问题和文件能力尚未实现。
 
 ## 环境要求
 
@@ -70,7 +70,16 @@ uv run --locked python -m app.manage_identity provision \
   --reason <approved-reason>
 ```
 
-由独立进程先处理已加密的恢复请求队列、再派发已提交的 Outbox；SMTP 已接受只表示邮件服务接受请求，不表示已送达或已阅读：
+工作空间的受控诊断必须带明确空间、操作者和理由；它只返回成员和邀请的最小标识/状态并写入安全审计：
+
+```bash
+uv run --locked python -m app.manage_workspaces \
+  --workspace-id <workspace-id> \
+  --operator <operator-id> \
+  --reason <approved-reason>
+```
+
+由独立进程先处理已加密的恢复请求队列、再派发已提交的 Outbox；工作空间邀请在派发前会再次复核邀请和凭据，SMTP 已接受只表示邮件服务接受请求，不表示已送达或已阅读：
 
 ```bash
 uv run --locked python -m app.mail_dispatcher --once
@@ -93,13 +102,15 @@ src/app/
 ├── api.py                 # 业务 API 聚合
 ├── identity/              # 账户、密码、session 与一次性凭据
 ├── notifications/         # Outbox、SMTP adapter 与派发状态
+├── workspaces/            # 工作空间、成员、邀请与兑换
 ├── manage_identity.py     # 受控账户开通与 Outbox 诊断命令
+├── manage_workspaces.py   # 受控工作空间诊断命令
 ├── mail_dispatcher.py     # 邮件派发进程入口
 ├── health.py              # 根级存活与就绪探针
 └── main.py                # 应用装配
 ```
 
-业务 router 通过 `src/app/api.py` 聚合，并由 `API_PREFIX` 统一挂载。业务成功响应使用 `ApiResponse[T]`；`/health` 与 `/ready` 不使用业务响应包装。数据库 Schema 只通过 Alembic 变更，不在启动时调用 `create_all()` 或自动迁移。认证 API 位于 `/sessions`、`/sessions/current`、`/account-recovery-requests`、`/account-activations/exchanges` 和 `/account-recovery-exchanges`；具体错误 reason 以 OpenAPI 为准。
+业务 router 通过 `src/app/api.py` 聚合，并由 `API_PREFIX` 统一挂载。业务成功响应使用 `ApiResponse[T]`；`/health` 与 `/ready` 不使用业务响应包装。数据库 Schema 只通过 Alembic 变更，不在启动时调用 `create_all()` 或自动迁移。认证 API 位于 `/sessions`、`/sessions/current`、`/account-recovery-requests`、`/account-activations/exchanges` 和 `/account-recovery-exchanges`；工作空间 API 位于 `/workspaces` 和 `/workspace-invitation-exchanges`。工作空间邀请使用 `Idempotency-Key`，token 仅可放在兑换请求体。具体字段和错误 reason 以 OpenAPI 为准。
 
 ## 验证与构建
 

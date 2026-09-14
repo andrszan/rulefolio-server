@@ -86,7 +86,9 @@ class OneTimeCredential(Base):
             "account_id",
             "purpose",
             unique=True,
-            postgresql_where=text("status = 'active'"),
+            postgresql_where=text(
+                "status = 'active' AND purpose IN ('account_activation', 'password_recovery')"
+            ),
         ),
     )
 

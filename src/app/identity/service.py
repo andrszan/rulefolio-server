@@ -11,6 +11,7 @@ from argon2.exceptions import InvalidHashError, VerifyMismatchError
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from email_validator import EmailNotValidError, validate_email
 from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.access import set_actor
@@ -35,6 +36,7 @@ TOKEN_CONSUMED = "consumed"
 TOKEN_REVOKED = "revoked"
 ACTIVATION = "account_activation"
 RECOVERY = "password_recovery"
+WORKSPACE_INVITATION = "workspace_invitation"
 RECOVERY_JOB_PENDING = "pending"
 RECOVERY_JOB_PROCESSING = "processing"
 RECOVERY_JOB_COMPLETED = "completed"
@@ -128,6 +130,11 @@ def _attempt_subject(value: str) -> bytes:
     return hmac.digest(pepper.encode(), value.encode(), "sha256")
 
 
+def attempt_subject(value: str) -> bytes:
+    """返回可由其他业务复用的受保护尝试主体散列。"""
+    return _attempt_subject(value)
+
+
 def _attempt_retry_after(
     session: Session, purpose: str, subject_hash: bytes, maximum: int
 ) -> int | None:
@@ -214,6 +221,126 @@ def _set_password(session: Session, account_id: UUID, password: str) -> None:
     else:
         credential.password_hash = hashed
         credential.updated_at = _now()
+
+
+def get_or_create_invitation_account(session: Session, email: str) -> Account:
+    """取得受邀账户；首次邀请只建立待激活账户，不在此处提交事务。"""
+    normalized_email = normalize_email(email)
+    account = session.scalar(
+        select(Account).where(Account.email == normalized_email).with_for_update()
+    )
+    if account is not None:
+        return account
+
+    try:
+        with session.begin_nested():
+            account = Account(email=normalized_email, status=PENDING_ACTIVATION)
+            session.add(account)
+            session.flush()
+    except IntegrityError:
+        account = session.scalar(
+            select(Account).where(Account.email == normalized_email).with_for_update()
+        )
+        if account is None:
+            raise RuntimeError("创建受邀账户时无法取得账户记录")
+    return account
+
+
+def issue_workspace_invitation_credential(
+    session: Session, account: Account
+) -> tuple[OneTimeCredential, str]:
+    """签发工作空间邀请凭据，调用方负责写入 Outbox 与提交事务。"""
+    token = secrets.token_urlsafe(32)
+    credential = OneTimeCredential(
+        account_id=account.id,
+        purpose=WORKSPACE_INVITATION,
+        token_hash=_token_hash(token),
+        expires_at=_now() + timedelta(minutes=settings.one_time_token_ttl_minutes),
+    )
+    session.add(credential)
+    session.flush()
+    return credential, token
+
+
+def find_workspace_invitation_credential_id(
+    session: Session, token: str
+) -> UUID | None:
+    """以摘要无锁定位邀请凭据，调用方必须在加锁后复核。"""
+    return session.scalar(
+        select(OneTimeCredential.id).where(
+            OneTimeCredential.purpose == WORKSPACE_INVITATION,
+            OneTimeCredential.token_hash == _token_hash(token),
+        )
+    )
+
+
+def lock_workspace_invitation_credential(
+    session: Session, token: str
+) -> OneTimeCredential | None:
+    """以摘要定位并锁定邀请凭据；调用方据此设置精确 RLS 范围。"""
+    digest = _token_hash(token)
+    credential = session.scalar(
+        select(OneTimeCredential)
+        .where(
+            OneTimeCredential.purpose == WORKSPACE_INVITATION,
+            OneTimeCredential.token_hash == digest,
+        )
+        .with_for_update()
+    )
+    if credential is None or not hmac.compare_digest(credential.token_hash, digest):
+        return None
+    return credential
+
+
+def consume_workspace_invitation_credential(
+    session: Session, credential: OneTimeCredential, now: datetime
+) -> bool:
+    result = session.execute(
+        update(OneTimeCredential)
+        .where(
+            OneTimeCredential.id == credential.id,
+            OneTimeCredential.purpose == WORKSPACE_INVITATION,
+            OneTimeCredential.status == TOKEN_ACTIVE,
+            OneTimeCredential.expires_at > now,
+        )
+        .values(status=TOKEN_CONSUMED, consumed_at=now)
+    )
+    return result.rowcount == 1
+
+
+def revoke_workspace_invitation_credential(
+    session: Session, credential: OneTimeCredential, now: datetime
+) -> bool:
+    result = session.execute(
+        update(OneTimeCredential)
+        .where(
+            OneTimeCredential.id == credential.id,
+            OneTimeCredential.purpose == WORKSPACE_INVITATION,
+            OneTimeCredential.status == TOKEN_ACTIVE,
+        )
+        .values(status=TOKEN_REVOKED, revoked_at=now)
+    )
+    return result.rowcount == 1
+
+
+def lock_account(session: Session, account_id: UUID) -> Account | None:
+    return session.scalar(
+        select(Account).where(Account.id == account_id).with_for_update()
+    )
+
+
+def activate_invited_account(
+    session: Session, account: Account, password: str
+) -> SessionResult:
+    """为待激活受邀账户设置密码、激活并签发一次 session，不提交。"""
+    if account.status != PENDING_ACTIVATION:
+        raise LinkUnavailable
+    _set_password(session, account.id, password)
+    account.status = ACTIVE
+    clear_outbox_envelopes(
+        session, _revoke_credentials(session, account.id, ACTIVATION)
+    )
+    return _create_session(session, account)
 
 
 def _revoke_credentials(session: Session, account_id: UUID, purpose: str) -> list[UUID]:
