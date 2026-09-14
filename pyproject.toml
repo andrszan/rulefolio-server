@@ -1,0 +1,44 @@
+[project]
+name = "rulefolio"
+version = "0.1.0"
+description = "好玩实验室的 FastAPI、同步 SQLAlchemy 与 PostgreSQL API 服务。"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.16,<2",
+    "fastapi>=0.115,<1",
+    "psycopg[binary]>=3.2,<4",
+    "pydantic>=2,<3",
+    "pydantic-settings>=2,<3",
+    "sqlalchemy>=2,<3",
+    "uvicorn>=0.30,<1",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=2,<3",
+    "pytest>=9,<10",
+    "ruff>=0.12,<1",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.0,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-name = "app"
+
+
+[tool.pytest]
+addopts = ["-ra", "--import-mode=importlib", "--strict-config", "--strict-markers"]
+testpaths = ["tests"]
+markers = ["integration: 需要显式 DB_* 配置的 PostgreSQL 集成测试"]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP"]
+
+[tool.ruff.lint.per-file-ignores]
+"alembic/versions/*.py" = ["F401"]
