@@ -57,6 +57,10 @@ def set_playtest_session_scope(session: Session, session_id: UUID) -> None:
     _set_scope(session, "app.playtest_session_id", session_id)
 
 
+def set_playtest_result_material_work_scope(session: Session, work_id: UUID) -> None:
+    _set_scope(session, "app.playtest_result_material_work_id", work_id)
+
+
 def set_playtest_participant_lookup_scope(session: Session, session_id: UUID) -> None:
     _set_scope(session, "app.playtest_participant_lookup_session_id", session_id)
 

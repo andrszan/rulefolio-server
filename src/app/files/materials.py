@@ -5,7 +5,10 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.access.context import set_file_lifecycle_scope
+from app.access.context import (
+    set_file_lifecycle_scope,
+    set_playtest_result_material_work_scope,
+)
 from app.files.models import StoredFile
 from app.works.models import WorkMaterialFile
 
@@ -58,6 +61,29 @@ def is_current_material(session: Session, work_id: UUID, file_id: UUID) -> bool:
             )
         )
         is not None
+    )
+
+
+def playtest_result_ready_materials(
+    session: Session,
+    workspace_id: UUID,
+    work_id: UUID,
+    file_ids: set[UUID] | None = None,
+) -> list[StoredFile]:
+    """仅供已完成试玩管理校验的结果读写获取本作品 ready 材料。"""
+    set_playtest_result_material_work_scope(session, work_id)
+    statement = select(StoredFile).where(
+        StoredFile.workspace_id == workspace_id,
+        StoredFile.work_id == work_id,
+        StoredFile.kind == "material",
+        StoredFile.status == "ready",
+    )
+    if file_ids is not None:
+        if not file_ids:
+            return []
+        statement = statement.where(StoredFile.id.in_(file_ids))
+    return list(
+        session.scalars(statement.order_by(StoredFile.created_at, StoredFile.id))
     )
 
 

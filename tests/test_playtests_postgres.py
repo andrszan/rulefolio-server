@@ -11,13 +11,18 @@ from sqlalchemy import select, text, update
 from app.access.context import set_actor, set_workspace_management_scope
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.evidence.models import PlaytestObservation
 from app.files import service as files_service
 from app.identity.models import Account
 from app.notifications import dispatcher
 from app.notifications.models import MailOutbox
 from app.notifications.service import enqueue_business_mail, suppress_business_mails
 from app.playtests import service as playtests_service
-from app.playtests.models import PlaytestSessionParticipant
+from app.playtests.models import (
+    PlaytestSessionActualMaterial,
+    PlaytestSessionActualParticipant,
+    PlaytestSessionParticipant,
+)
 from app.works import service as works_service
 from app.workspaces import service as workspaces_service
 from app.workspaces.models import WorkAccess, WorkspaceMember
@@ -40,18 +45,26 @@ def prepared_playtest() -> tuple[object, ...]:
     contender = Account(
         email=f"playtest-contender-{suffix}@example.com", status="active"
     )
+    collaborator = Account(
+        email=f"playtest-collaborator-{suffix}@example.com", status="active"
+    )
     rules = Path(__file__).parents[1] / "src/app/baseline-rules.pdf"
     aid = Path(__file__).parents[1] / "src/app/baseline-player-aid.pdf"
 
     with SessionLocal() as session:
-        session.add_all((owner, organizer, guest, contender))
+        session.add_all((owner, organizer, guest, contender, collaborator))
         session.commit()
         set_actor(session, owner.id)
         workspace = workspaces_service.create_workspace(
             session, owner.id, f"试玩-{suffix[:8]}", None
         )
         set_workspace_management_scope(session, workspace.id)
-        session.add(WorkspaceMember(workspace_id=workspace.id, account_id=organizer.id))
+        session.add_all(
+            (
+                WorkspaceMember(workspace_id=workspace.id, account_id=organizer.id),
+                WorkspaceMember(workspace_id=workspace.id, account_id=collaborator.id),
+            )
+        )
         session.commit()
         set_actor(session, owner.id)
         work = works_service.create_work(
@@ -69,6 +82,10 @@ def prepared_playtest() -> tuple[object, ...]:
         set_actor(session, owner.id)
         works_service.set_work_access(
             session, owner.id, workspace.id, work.id, organizer.id, "organizer"
+        )
+        set_actor(session, owner.id)
+        works_service.set_work_access(
+            session, owner.id, workspace.id, work.id, collaborator.id, "collaborator"
         )
         set_actor(session, owner.id)
         with rules.open("rb") as source:
@@ -122,7 +139,11 @@ def prepared_playtest() -> tuple[object, ...]:
         )
         session_id = plan.sessions[0].id
         owner_id, organizer_id = owner.id, organizer.id
-        guest_id, contender_id = guest.id, contender.id
+        guest_id, contender_id, collaborator_id = (
+            guest.id,
+            contender.id,
+            collaborator.id,
+        )
         workspace_id = workspace.id
         session.rollback()
     return (
@@ -130,6 +151,7 @@ def prepared_playtest() -> tuple[object, ...]:
         organizer_id,
         guest_id,
         contender_id,
+        collaborator_id,
         workspace_id,
         work,
         first,
@@ -148,6 +170,7 @@ def test_organizer_snapshot_guest_material_confirmation_and_cancellation(
         organizer,
         guest,
         contender,
+        _,
         workspace,
         work,
         first,
@@ -286,6 +309,173 @@ def test_organizer_snapshot_guest_material_confirmation_and_cancellation(
         session.rollback()
 
 
+def test_result_actual_participation_materials_and_observations(
+    prepared_playtest: tuple[object, ...],
+) -> None:
+    (
+        _,
+        organizer,
+        guest,
+        _,
+        collaborator,
+        workspace,
+        work,
+        first,
+        second,
+        _,
+        session_id,
+        _,
+    ) = prepared_playtest
+
+    with SessionLocal() as session:
+        arranged = playtests_service.read_managed_session(
+            session, organizer, workspace, work.id, session_id
+        )
+        started = playtests_service.start_session(
+            session, organizer, workspace, work.id, session_id, arranged.revision
+        )
+        saved = playtests_service.save_result(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            started.revision,
+            playtests_service.ResultDraft(
+                actual_headcount=2,
+                actual_duration_minutes=0,
+                completion_status="completed",
+                actual_material=playtests_service.ActualMaterialDraft(
+                    rule_name=started.rule_name,
+                    rule_description=started.rule_description,
+                    rule_content=started.rule_content,
+                    material_file_ids=(second.id,),
+                    change_reason="现场改用辅助页说明规则。",
+                ),
+                actual_participants=(
+                    playtests_service.ActualParticipantDraft(
+                        planned_account_id=guest,
+                        temporary_code=None,
+                        seat_or_faction="先手",
+                        score_or_outcome="获胜",
+                    ),
+                    playtests_service.ActualParticipantDraft(
+                        planned_account_id=None,
+                        temporary_code="临场观察者",
+                        seat_or_faction=None,
+                        score_or_outcome=None,
+                    ),
+                ),
+            ),
+        )
+        assert saved.session.revision > started.revision
+        fact = playtests_service.create_observation(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            saved.session.revision,
+            "fact",
+            "玩家在第一轮主动解释了路径选择。",
+        )
+        corrected = playtests_service.update_observation(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            fact.observation.id,
+            fact.revision,
+            "organizer_interpretation",
+            "提示语已经能帮助玩家快速分工。",
+        )
+        result = playtests_service.read_result(
+            session, organizer, workspace, work.id, session_id
+        )
+        assert result.session.status == "started"
+        assert result.session.revision == corrected.revision
+        assert result.actual_headcount == 2
+        assert result.actual_duration_minutes == 0
+        assert result.completion_status == "completed"
+        assert result.actual_material is not None
+        assert result.actual_material.change_reason == "现场改用辅助页说明规则。"
+        assert [material.id for material in result.actual_material.materials] == [
+            second.id
+        ]
+        assert {material.id for material in result.material_candidates} == {
+            first.id,
+            second.id,
+        }
+        assert {item.planned_account_id for item in result.actual_participants} == {
+            guest,
+            None,
+        }
+        assert result.observations[0].id == fact.observation.id
+        assert result.observations[0].kind == "organizer_interpretation"
+
+        session.rollback()
+        set_actor(session, guest)
+        assert list(session.scalars(select(PlaytestSessionActualMaterial))) == []
+        assert list(session.scalars(select(PlaytestSessionActualParticipant))) == []
+        assert list(session.scalars(select(PlaytestObservation))) == []
+        with pytest.raises(playtests_service.PlaytestUnavailable):
+            playtests_service.read_result(
+                session, guest, workspace, work.id, session_id
+            )
+        with pytest.raises(playtests_service.PlaytestUnavailable):
+            playtests_service.create_observation(
+                session,
+                guest,
+                workspace,
+                work.id,
+                session_id,
+                corrected.revision,
+                "fact",
+                "无权写入的观察。",
+            )
+
+        set_actor(session, collaborator)
+        assert list(session.scalars(select(PlaytestSessionActualMaterial))) == []
+        assert list(session.scalars(select(PlaytestSessionActualParticipant))) == []
+        assert list(session.scalars(select(PlaytestObservation))) == []
+        with pytest.raises(playtests_service.PlaytestManagementForbidden):
+            playtests_service.read_result(
+                session, collaborator, workspace, work.id, session_id
+            )
+        session.rollback()
+        with pytest.raises(playtests_service.PlaytestManagementForbidden):
+            playtests_service.create_observation(
+                session,
+                collaborator,
+                workspace,
+                work.id,
+                session_id,
+                corrected.revision,
+                "fact",
+                "无权写入的观察。",
+            )
+        session.rollback()
+
+        with pytest.raises(playtests_service.PlaytestSessionRevisionConflict):
+            playtests_service.save_result(
+                session,
+                organizer,
+                workspace,
+                work.id,
+                session_id,
+                saved.session.revision,
+                playtests_service.ResultDraft(
+                    actual_headcount=None,
+                    actual_duration_minutes=None,
+                    completion_status=None,
+                    actual_material=None,
+                    actual_participants=(),
+                ),
+            )
+        session.rollback()
+
+
 def test_business_outbox_records_unknown_and_explicit_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -337,7 +527,7 @@ def test_business_outbox_records_unknown_and_explicit_failure(
 def test_playtest_rls_constraints_and_app_identity(
     prepared_playtest: tuple[object, ...],
 ) -> None:
-    _, organizer, guest, _, workspace, work, first, _, _, session_id, _ = (
+    _, organizer, guest, _, _, workspace, work, first, _, _, session_id, _ = (
         prepared_playtest
     )
     with SessionLocal() as session:

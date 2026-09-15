@@ -7,6 +7,7 @@ from app import project_baseline
 from app.access.context import set_actor, set_project_baseline_scope
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.evidence.models import PlaytestObservation
 from app.files import service as files_service
 from app.files import storage
 from app.files.models import StoredFile
@@ -16,6 +17,8 @@ from app.notifications.models import MailOutbox
 from app.playtests.models import (
     PlaytestPlan,
     PlaytestSession,
+    PlaytestSessionActualMaterial,
+    PlaytestSessionActualParticipant,
     PlaytestSessionParticipant,
 )
 from app.project_baseline import (
@@ -56,13 +59,30 @@ def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID, tuple[UUID, ...]]:
         plans = list(session.scalars(select(PlaytestPlan)))
         sessions = list(session.scalars(select(PlaytestSession)))
         participants = list(session.scalars(select(PlaytestSessionParticipant)))
+        actual_materials = list(session.scalars(select(PlaytestSessionActualMaterial)))
+        actual_participants = list(
+            session.scalars(select(PlaytestSessionActualParticipant))
+        )
+        observations = list(session.scalars(select(PlaytestObservation)))
         assert [account.email for account in accounts] == sorted(
             account.email for account in BASELINE_ACCOUNTS
         )
         assert len(workspaces) == len(works) == len(plans) == 1
         assert len(accesses) == 3
         assert len(sessions) == 2
+        assert {item.completion_status for item in sessions} == {
+            "completed",
+            "interrupted",
+        }
+        assert sum(item.actual_headcount is None for item in sessions) == 1
         assert len(participants) == 2
+        assert len(actual_materials) == 3
+        assert len(actual_participants) == 2
+        assert {item.kind for item in observations} == {
+            "fact",
+            "organizer_interpretation",
+            "temporary_variant",
+        }
         assert (
             sum(participant.status == "confirmed" for participant in participants) == 1
         )

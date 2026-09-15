@@ -14,6 +14,8 @@ from app.access.context import (
     set_playtest_session_scope,
 )
 from app.core.config import settings
+from app.evidence import service as evidence_service
+from app.files import materials as file_materials
 from app.files import service as files_service
 from app.files.models import StoredFile
 from app.identity import service as identity_service
@@ -23,6 +25,8 @@ from app.notifications.service import enqueue_business_mail, suppress_business_m
 from app.playtests.models import (
     PlaytestPlan,
     PlaytestSession,
+    PlaytestSessionActualMaterial,
+    PlaytestSessionActualParticipant,
     PlaytestSessionMaterial,
     PlaytestSessionParticipant,
 )
@@ -168,6 +172,72 @@ class ConfirmationData:
     status: str
     confirmed_count: int
     capacity: int
+
+
+@dataclass(frozen=True)
+class ActualMaterialData:
+    rule_name: str
+    rule_description: str | None
+    rule_content: str
+    change_reason: str | None
+    materials: tuple[MaterialData, ...]
+
+
+@dataclass(frozen=True)
+class ActualParticipantData:
+    planned_account_id: UUID | None
+    email: str | None
+    temporary_code: str | None
+    seat_or_faction: str | None
+    score_or_outcome: str | None
+
+
+@dataclass(frozen=True)
+class ResultData:
+    session: SessionData
+    actual_headcount: int | None
+    actual_duration_minutes: int | None
+    completion_status: str | None
+    material_candidates: tuple[MaterialData, ...]
+    actual_material: ActualMaterialData | None
+    actual_participants: tuple[ActualParticipantData, ...]
+    observations: tuple[evidence_service.ObservationData, ...]
+
+
+@dataclass(frozen=True)
+class ActualMaterialDraft:
+    rule_name: str
+    rule_description: str | None
+    rule_content: str
+    material_file_ids: tuple[UUID, ...]
+    change_reason: str | None
+
+
+@dataclass(frozen=True)
+class ActualParticipantDraft:
+    planned_account_id: UUID | None
+    temporary_code: str | None
+    seat_or_faction: str | None
+    score_or_outcome: str | None
+
+
+@dataclass(frozen=True)
+class ResultDraft:
+    actual_headcount: int | None
+    actual_duration_minutes: int | None
+    completion_status: str | None
+    actual_material: ActualMaterialDraft | None
+    actual_participants: tuple[ActualParticipantDraft, ...]
+
+
+@dataclass(frozen=True)
+class ObservationMutationData:
+    observation: evidence_service.ObservationData
+    revision: int
+
+
+class PlaytestResultInvalid(Exception):
+    pass
 
 
 def _now() -> datetime:
@@ -882,6 +952,446 @@ def cancel_session(
         session.rollback()
         raise PlaytestOperationRetryable from error
     return read_managed_session(session, actor_id, workspace_id, work_id, session_id)
+
+
+def _actual_materials(
+    session: Session, item: PlaytestSession
+) -> ActualMaterialData | None:
+    if not item.actual_material_recorded:
+        return None
+    if item.actual_rule_name is None or item.actual_rule_content is None:
+        raise PlaytestUnavailable
+    relations = list(
+        session.scalars(
+            select(PlaytestSessionActualMaterial)
+            .where(PlaytestSessionActualMaterial.session_id == item.id)
+            .order_by(PlaytestSessionActualMaterial.file_id)
+        )
+    )
+    materials: list[MaterialData] = []
+    for relation in relations:
+        set_file_lifecycle_scope(session, relation.file_id)
+        file = session.scalar(
+            select(StoredFile).where(
+                StoredFile.id == relation.file_id,
+                StoredFile.kind == "material",
+                StoredFile.status == "ready",
+            )
+        )
+        if file is None or file.sha256 != relation.sha256:
+            raise PlaytestUnavailable
+        materials.append(
+            MaterialData(
+                id=file.id,
+                display_name=file.display_name,
+                detected_content_type=file.detected_content_type,
+                size_bytes=file.size_bytes,
+                sha256=relation.sha256.hex(),
+            )
+        )
+    return ActualMaterialData(
+        rule_name=item.actual_rule_name,
+        rule_description=item.actual_rule_description,
+        rule_content=item.actual_rule_content,
+        change_reason=item.actual_material_change_reason,
+        materials=tuple(materials),
+    )
+
+
+def _actual_participants(
+    session: Session, session_id: UUID
+) -> tuple[ActualParticipantData, ...]:
+    rows = session.execute(
+        select(PlaytestSessionActualParticipant, Account.email)
+        .outerjoin(
+            Account,
+            Account.id == PlaytestSessionActualParticipant.planned_account_id,
+        )
+        .where(PlaytestSessionActualParticipant.session_id == session_id)
+        .order_by(PlaytestSessionActualParticipant.id)
+    )
+    return tuple(
+        ActualParticipantData(
+            planned_account_id=participant.planned_account_id,
+            email=email,
+            temporary_code=participant.temporary_code,
+            seat_or_faction=participant.seat_or_faction,
+            score_or_outcome=participant.score_or_outcome,
+        )
+        for participant, email in rows
+    )
+
+
+def _result_data(session: Session, item: PlaytestSession) -> ResultData:
+    set_playtest_session_scope(session, item.id)
+    return ResultData(
+        session=_session_data(session, item, include_participants=True),
+        actual_headcount=item.actual_headcount,
+        actual_duration_minutes=item.actual_duration_minutes,
+        completion_status=item.completion_status,
+        material_candidates=tuple(
+            MaterialData(
+                id=file.id,
+                display_name=file.display_name,
+                detected_content_type=file.detected_content_type,
+                size_bytes=file.size_bytes,
+                sha256=file.sha256.hex(),
+            )
+            for file in file_materials.playtest_result_ready_materials(
+                session, item.workspace_id, item.work_id
+            )
+        ),
+        actual_material=_actual_materials(session, item),
+        actual_participants=_actual_participants(session, item.id),
+        observations=evidence_service.list_observations(session, item.id),
+    )
+
+
+def _optional_text(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise PlaytestResultInvalid
+    value = value.strip()
+    if len(value) > limit:
+        raise PlaytestResultInvalid
+    return value or None
+
+
+def _required_text(value: str, limit: int) -> str:
+    normalized = _optional_text(value, limit)
+    if normalized is None:
+        raise PlaytestResultInvalid
+    return normalized
+
+
+def _validate_result_draft(
+    session: Session, item: PlaytestSession, draft: ResultDraft
+) -> ResultDraft:
+    if draft.actual_headcount is not None and (
+        not isinstance(draft.actual_headcount, int)
+        or isinstance(draft.actual_headcount, bool)
+        or draft.actual_headcount < 0
+    ):
+        raise PlaytestResultInvalid
+    if draft.actual_duration_minutes is not None and (
+        not isinstance(draft.actual_duration_minutes, int)
+        or isinstance(draft.actual_duration_minutes, bool)
+        or draft.actual_duration_minutes < 0
+    ):
+        raise PlaytestResultInvalid
+    if draft.completion_status not in {None, "completed", "interrupted"}:
+        raise PlaytestResultInvalid
+
+    participant_ids = set(
+        session.scalars(
+            select(PlaytestSessionParticipant.account_id).where(
+                PlaytestSessionParticipant.session_id == item.id
+            )
+        )
+    )
+    accounts: set[UUID] = set()
+    temporary_codes: set[str] = set()
+    actual_participants: list[ActualParticipantDraft] = []
+    for participant in draft.actual_participants:
+        account_id = participant.planned_account_id
+        temporary_code = _optional_text(participant.temporary_code, 160)
+        seat_or_faction = _optional_text(participant.seat_or_faction, 160)
+        score_or_outcome = _optional_text(participant.score_or_outcome, 160)
+        if (account_id is None) == (temporary_code is None):
+            raise PlaytestResultInvalid
+        if account_id is not None:
+            if account_id not in participant_ids or account_id in accounts:
+                raise PlaytestResultInvalid
+            accounts.add(account_id)
+        elif temporary_code in temporary_codes:
+            raise PlaytestResultInvalid
+        else:
+            temporary_codes.add(temporary_code)
+        actual_participants.append(
+            ActualParticipantDraft(
+                planned_account_id=account_id,
+                temporary_code=temporary_code,
+                seat_or_faction=seat_or_faction,
+                score_or_outcome=score_or_outcome,
+            )
+        )
+    if draft.actual_headcount is not None and draft.actual_headcount < len(
+        actual_participants
+    ):
+        raise PlaytestResultInvalid
+
+    actual_material = draft.actual_material
+    if actual_material is not None:
+        rule_name = _required_text(actual_material.rule_name, 160)
+        rule_description = _optional_text(actual_material.rule_description, 4_000)
+        rule_content = _required_text(actual_material.rule_content, 20_000)
+        material_file_ids = actual_material.material_file_ids
+        if len(set(material_file_ids)) != len(material_file_ids):
+            raise PlaytestResultInvalid
+        files = file_materials.playtest_result_ready_materials(
+            session,
+            item.workspace_id,
+            item.work_id,
+            set(material_file_ids),
+        )
+        if len(files) != len(material_file_ids):
+            raise PlaytestResultInvalid
+        scheduled = {
+            (material.id, material.sha256) for material in _materials(session, item.id)
+        }
+        actual = {(file.id, file.sha256.hex()) for file in files}
+        changed = (
+            rule_name != item.rule_name
+            or rule_description != item.rule_description
+            or rule_content != item.rule_content
+            or actual != scheduled
+        )
+        change_reason = _optional_text(actual_material.change_reason, 4_000)
+        if changed and change_reason is None:
+            raise PlaytestResultInvalid
+        actual_material = ActualMaterialDraft(
+            rule_name=rule_name,
+            rule_description=rule_description,
+            rule_content=rule_content,
+            material_file_ids=tuple(file.id for file in files),
+            change_reason=change_reason if changed else None,
+        )
+
+    return ResultDraft(
+        actual_headcount=draft.actual_headcount,
+        actual_duration_minutes=draft.actual_duration_minutes,
+        completion_status=draft.completion_status,
+        actual_material=actual_material,
+        actual_participants=tuple(actual_participants),
+    )
+
+
+def _require_started(session: Session, item: PlaytestSession) -> None:
+    if item.status != STARTED:
+        session.rollback()
+        raise PlaytestSessionStateInvalid
+
+
+def read_result(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+) -> ResultData:
+    try:
+        _require_management(session, actor_id, workspace_id, work_id)
+        item = _load_managed_session(
+            session, workspace_id, work_id, session_id, lock=False
+        )
+        _require_started(session, item)
+        return _result_data(session, item)
+    except (
+        PlaytestManagementForbidden,
+        PlaytestSessionStateInvalid,
+        PlaytestUnavailable,
+        PlaytestOperationRetryable,
+    ):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+
+
+def save_result(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    expected_revision: int,
+    draft: ResultDraft,
+) -> ResultData:
+    if expected_revision <= 0:
+        raise PlaytestResultInvalid
+    try:
+        _require_management(session, actor_id, workspace_id, work_id)
+        item = _load_managed_session(
+            session, workspace_id, work_id, session_id, lock=True
+        )
+        if item.revision != expected_revision:
+            session.rollback()
+            raise PlaytestSessionRevisionConflict
+        _require_started(session, item)
+        draft = _validate_result_draft(session, item, draft)
+        item.actual_headcount = draft.actual_headcount
+        item.actual_duration_minutes = draft.actual_duration_minutes
+        item.completion_status = draft.completion_status
+        item.actual_material_recorded = draft.actual_material is not None
+        item.actual_rule_name = (
+            draft.actual_material.rule_name
+            if draft.actual_material is not None
+            else None
+        )
+        item.actual_rule_description = (
+            draft.actual_material.rule_description
+            if draft.actual_material is not None
+            else None
+        )
+        item.actual_rule_content = (
+            draft.actual_material.rule_content
+            if draft.actual_material is not None
+            else None
+        )
+        item.actual_material_change_reason = (
+            draft.actual_material.change_reason
+            if draft.actual_material is not None
+            else None
+        )
+        set_playtest_session_scope(session, item.id)
+        session.execute(
+            delete(PlaytestSessionActualMaterial).where(
+                PlaytestSessionActualMaterial.session_id == item.id
+            )
+        )
+        session.execute(
+            delete(PlaytestSessionActualParticipant).where(
+                PlaytestSessionActualParticipant.session_id == item.id
+            )
+        )
+        if draft.actual_material is not None:
+            files = file_materials.playtest_result_ready_materials(
+                session,
+                item.workspace_id,
+                item.work_id,
+                set(draft.actual_material.material_file_ids),
+            )
+            session.add_all(
+                PlaytestSessionActualMaterial(
+                    session_id=item.id,
+                    file_id=file.id,
+                    sha256=file.sha256,
+                )
+                for file in files
+            )
+        session.add_all(
+            PlaytestSessionActualParticipant(
+                session_id=item.id,
+                planned_account_id=participant.planned_account_id,
+                temporary_code=participant.temporary_code,
+                seat_or_faction=participant.seat_or_faction,
+                score_or_outcome=participant.score_or_outcome,
+            )
+            for participant in draft.actual_participants
+        )
+        item.revision += 1
+        _commit_or_rollback(session)
+    except (
+        PlaytestManagementForbidden,
+        PlaytestResultInvalid,
+        PlaytestSessionRevisionConflict,
+        PlaytestSessionStateInvalid,
+        PlaytestUnavailable,
+        PlaytestOperationRetryable,
+    ):
+        session.rollback()
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+    return read_result(session, actor_id, workspace_id, work_id, session_id)
+
+
+def create_observation(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    expected_revision: int,
+    kind: str,
+    content: str,
+) -> ObservationMutationData:
+    if expected_revision <= 0:
+        raise PlaytestResultInvalid
+    try:
+        _require_management(session, actor_id, workspace_id, work_id)
+        item = _load_managed_session(
+            session, workspace_id, work_id, session_id, lock=True
+        )
+        if item.revision != expected_revision:
+            session.rollback()
+            raise PlaytestSessionRevisionConflict
+        _require_started(session, item)
+        observation = evidence_service.create_observation(
+            session, item.id, actor_id, kind, content
+        )
+        item.revision += 1
+        revision = item.revision
+        _commit_or_rollback(session)
+    except evidence_service.ObservationInvalid as error:
+        session.rollback()
+        raise PlaytestResultInvalid from error
+    except (
+        PlaytestManagementForbidden,
+        PlaytestResultInvalid,
+        PlaytestSessionRevisionConflict,
+        PlaytestSessionStateInvalid,
+        PlaytestUnavailable,
+        PlaytestOperationRetryable,
+    ):
+        session.rollback()
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+    return ObservationMutationData(observation=observation, revision=revision)
+
+
+def update_observation(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    observation_id: UUID,
+    expected_revision: int,
+    kind: str,
+    content: str,
+) -> ObservationMutationData:
+    if expected_revision <= 0:
+        raise PlaytestResultInvalid
+    try:
+        _require_management(session, actor_id, workspace_id, work_id)
+        item = _load_managed_session(
+            session, workspace_id, work_id, session_id, lock=True
+        )
+        if item.revision != expected_revision:
+            session.rollback()
+            raise PlaytestSessionRevisionConflict
+        _require_started(session, item)
+        observation = evidence_service.update_observation(
+            session, item.id, observation_id, actor_id, kind, content
+        )
+        item.revision += 1
+        revision = item.revision
+        _commit_or_rollback(session)
+    except evidence_service.ObservationInvalid as error:
+        session.rollback()
+        raise PlaytestResultInvalid from error
+    except evidence_service.ObservationUnavailable as error:
+        session.rollback()
+        raise PlaytestUnavailable from error
+    except (
+        PlaytestManagementForbidden,
+        PlaytestResultInvalid,
+        PlaytestSessionRevisionConflict,
+        PlaytestSessionStateInvalid,
+        PlaytestUnavailable,
+        PlaytestOperationRetryable,
+    ):
+        session.rollback()
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+    return ObservationMutationData(observation=observation, revision=revision)
 
 
 def read_managed_session(

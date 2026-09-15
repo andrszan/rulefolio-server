@@ -15,6 +15,7 @@ from app.access.context import set_actor, set_project_baseline_scope
 from app.audit.models import SecurityAudit
 from app.core.config import settings
 from app.core.database import engine
+from app.evidence.models import PlaytestObservation
 from app.files import service as files_service
 from app.files import storage
 from app.files.models import StoredFile
@@ -33,6 +34,8 @@ from app.playtests import service as playtests_service
 from app.playtests.models import (
     PlaytestPlan,
     PlaytestSession,
+    PlaytestSessionActualMaterial,
+    PlaytestSessionActualParticipant,
     PlaytestSessionMaterial,
     PlaytestSessionParticipant,
 )
@@ -149,8 +152,11 @@ def _record_count(session: Session) -> int:
         WorkMaterialFile,
         PlaytestPlan,
         PlaytestSession,
+        PlaytestSessionActualMaterial,
+        PlaytestSessionActualParticipant,
         PlaytestSessionMaterial,
         PlaytestSessionParticipant,
+        PlaytestObservation,
         StoredFile,
     )
     return sum(
@@ -180,6 +186,8 @@ def _baseline_counts() -> dict[str, int]:
         "playtest_plans": 1,
         "playtest_sessions": 2,
         "playtest_confirmations": 1,
+        "playtest_actual_participants": 2,
+        "playtest_observations": 3,
     }
 
 
@@ -344,6 +352,112 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
         )
         mail_dispatcher.dispatch_one(session)
 
+        first_started = playtests_service.start_session(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            plan.sessions[0].id,
+            plan.sessions[0].revision,
+        )
+        first_result = playtests_service.save_result(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            first_started.id,
+            first_started.revision,
+            playtests_service.ResultDraft(
+                actual_headcount=1,
+                actual_duration_minutes=55,
+                completion_status="completed",
+                actual_material=playtests_service.ActualMaterialDraft(
+                    rule_name=first_started.rule_name,
+                    rule_description=first_started.rule_description,
+                    rule_content=first_started.rule_content,
+                    material_file_ids=tuple(
+                        material.id for material in first_started.materials
+                    ),
+                    change_reason=None,
+                ),
+                actual_participants=(
+                    playtests_service.ActualParticipantDraft(
+                        planned_account_id=playtester.id,
+                        temporary_code=None,
+                        seat_or_faction="向导",
+                        score_or_outcome="完成返回",
+                    ),
+                ),
+            ),
+        )
+        first_fact = playtests_service.create_observation(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            first_started.id,
+            first_result.session.revision,
+            "fact",
+            "玩家在第三回合前主动分工记录线索。",
+        )
+        playtests_service.create_observation(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            first_started.id,
+            first_fact.revision,
+            "organizer_interpretation",
+            "分工出现得早，现有提示已经足以引导协作。",
+        )
+
+        second_started = playtests_service.start_session(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            plan.sessions[1].id,
+            plan.sessions[1].revision,
+        )
+        second_result = playtests_service.save_result(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            second_started.id,
+            second_started.revision,
+            playtests_service.ResultDraft(
+                actual_headcount=None,
+                actual_duration_minutes=None,
+                completion_status="interrupted",
+                actual_material=playtests_service.ActualMaterialDraft(
+                    rule_name=second_started.rule_name,
+                    rule_description=second_started.rule_description,
+                    rule_content=second_started.rule_content,
+                    material_file_ids=(materials[1].id,),
+                    change_reason="现场改用打印辅助页进行口头讲解。",
+                ),
+                actual_participants=(
+                    playtests_service.ActualParticipantDraft(
+                        planned_account_id=None,
+                        temporary_code="临场观察者",
+                        seat_or_faction=None,
+                        score_or_outcome=None,
+                    ),
+                ),
+            ),
+        )
+        playtests_service.create_observation(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            second_started.id,
+            second_result.session.revision,
+            "temporary_variant",
+            "因时间不足跳过终局结算，改为口头复盘。",
+        )
+
         phase = "audit"
         session.add(
             SecurityAudit(
@@ -368,6 +482,9 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
 def _clear_database(session: Session) -> int:
     set_project_baseline_scope(session)
     models = (
+        PlaytestObservation,
+        PlaytestSessionActualMaterial,
+        PlaytestSessionActualParticipant,
         PlaytestSessionMaterial,
         PlaytestSessionParticipant,
         PlaytestSession,

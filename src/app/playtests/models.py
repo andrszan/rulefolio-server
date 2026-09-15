@@ -68,6 +68,29 @@ class PlaytestSession(Base):
             "OR (status IN ('scheduled', 'cancelled') AND started_at IS NULL)",
             name="ck_playtest_session_started_at_state",
         ),
+        CheckConstraint(
+            "actual_headcount IS NULL OR actual_headcount >= 0",
+            name="ck_playtest_session_actual_headcount_nonnegative",
+        ),
+        CheckConstraint(
+            "actual_duration_minutes IS NULL OR actual_duration_minutes >= 0",
+            name="ck_playtest_session_actual_duration_nonnegative",
+        ),
+        CheckConstraint(
+            "completion_status IS NULL OR completion_status IN ('completed', 'interrupted')",
+            name="ck_playtest_session_completion_status",
+        ),
+        CheckConstraint(
+            "(NOT actual_material_recorded "
+            "AND actual_rule_name IS NULL "
+            "AND actual_rule_description IS NULL "
+            "AND actual_rule_content IS NULL "
+            "AND actual_material_change_reason IS NULL) "
+            "OR (actual_material_recorded "
+            "AND btrim(actual_rule_name) <> '' "
+            "AND btrim(actual_rule_content) <> '')",
+            name="ck_playtest_session_actual_material_shape",
+        ),
         ForeignKeyConstraint(
             ["plan_id", "workspace_id", "work_id"],
             [
@@ -119,6 +142,16 @@ class PlaytestSession(Base):
     rule_name: Mapped[str] = mapped_column(String(160), nullable=False)
     rule_description: Mapped[str | None] = mapped_column(Text)
     rule_content: Mapped[str] = mapped_column(Text, nullable=False)
+    actual_headcount: Mapped[int | None] = mapped_column(Integer)
+    actual_duration_minutes: Mapped[int | None] = mapped_column(Integer)
+    completion_status: Mapped[str | None] = mapped_column(String(16))
+    actual_material_recorded: Mapped[bool] = mapped_column(
+        nullable=False, default=False
+    )
+    actual_rule_name: Mapped[str | None] = mapped_column(String(160))
+    actual_rule_description: Mapped[str | None] = mapped_column(Text)
+    actual_rule_content: Mapped[str | None] = mapped_column(Text)
+    actual_material_change_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -185,3 +218,72 @@ class PlaytestSessionParticipant(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
+
+
+class PlaytestSessionActualMaterial(Base):
+    __tablename__ = "playtest_session_actual_materials"
+    __table_args__ = (
+        UniqueConstraint(
+            "session_id", "file_id", name="uq_playtest_session_actual_material"
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("playtest_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    file_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("files.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    sha256: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
+
+
+class PlaytestSessionActualParticipant(Base):
+    __tablename__ = "playtest_session_actual_participants"
+    __table_args__ = (
+        CheckConstraint(
+            "(planned_account_id IS NOT NULL AND temporary_code IS NULL) "
+            "OR (planned_account_id IS NULL AND btrim(temporary_code) <> '')",
+            name="ck_playtest_actual_participant_identity",
+        ),
+        ForeignKeyConstraint(
+            ["session_id", "planned_account_id"],
+            [
+                "playtest_session_participants.session_id",
+                "playtest_session_participants.account_id",
+            ],
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint(
+            "session_id",
+            "planned_account_id",
+            name="uq_playtest_actual_participant_account",
+        ),
+        UniqueConstraint(
+            "session_id",
+            "temporary_code",
+            name="uq_playtest_actual_participant_temporary_code",
+        ),
+        Index("ix_playtest_actual_participants_session", "session_id", "id"),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("playtest_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    planned_account_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True)
+    )
+    temporary_code: Mapped[str | None] = mapped_column(String(160))
+    seat_or_faction: Mapped[str | None] = mapped_column(String(160))
+    score_or_outcome: Mapped[str | None] = mapped_column(String(160))

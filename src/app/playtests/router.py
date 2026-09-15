@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.core.database import get_db
 from app.core.errors import api_error
 from app.core.responses import ApiResponse, Page, PageParams
+from app.evidence import service as evidence_service
 from app.files.router import _binary_response
 from app.identity import service as identity_service
 from app.identity.models import Account
@@ -195,6 +196,164 @@ class ConfirmationResponseData(BaseModel):
     capacity: int
 
 
+class ActualParticipantRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    planned_account_id: UUID | None = Field(
+        default=None, validation_alias="plannedAccountId"
+    )
+    temporary_code: str | None = Field(
+        default=None, max_length=160, validation_alias="temporaryCode"
+    )
+    seat_or_faction: str | None = Field(
+        default=None, max_length=160, validation_alias="seatOrFaction"
+    )
+    score_or_outcome: str | None = Field(
+        default=None, max_length=160, validation_alias="scoreOrOutcome"
+    )
+
+
+class ActualMaterialRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    rule_name: str = Field(min_length=1, max_length=160, validation_alias="ruleName")
+    rule_description: str | None = Field(
+        default=None, max_length=4_000, validation_alias="ruleDescription"
+    )
+    rule_content: str = Field(
+        min_length=1, max_length=20_000, validation_alias="ruleContent"
+    )
+    material_file_ids: list[UUID] = Field(
+        default_factory=list, validation_alias="materialFileIds"
+    )
+    change_reason: str | None = Field(
+        default=None, max_length=4_000, validation_alias="changeReason"
+    )
+
+    @field_validator("rule_name", "rule_content")
+    @classmethod
+    def strip_required_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("字段不能为空")
+        return value
+
+    @field_validator("rule_description", "change_reason")
+    @classmethod
+    def strip_optional_text(cls, value: str | None) -> str | None:
+        return value.strip() if value is not None else None
+
+
+class ResultRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    expected_revision: int = Field(gt=0, validation_alias="expectedRevision")
+    actual_headcount: int | None = Field(
+        default=None, ge=0, validation_alias="actualHeadcount"
+    )
+    actual_duration_minutes: int | None = Field(
+        default=None, ge=0, validation_alias="actualDurationMinutes"
+    )
+    completion_status: str | None = Field(
+        default=None, validation_alias="completionStatus"
+    )
+    actual_material: ActualMaterialRequest | None = Field(
+        default=None, validation_alias="actualMaterial"
+    )
+    actual_participants: list[ActualParticipantRequest] = Field(
+        default_factory=list, validation_alias="actualParticipants"
+    )
+
+    @field_validator("completion_status")
+    @classmethod
+    def validate_completion_status(cls, value: str | None) -> str | None:
+        if value not in {None, "completed", "interrupted"}:
+            raise ValueError("完成状态无效")
+        return value
+
+
+class ObservationRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    expected_revision: int = Field(gt=0, validation_alias="expectedRevision")
+    kind: str
+    content: str = Field(min_length=1, max_length=4_000)
+
+    @field_validator("kind")
+    @classmethod
+    def validate_kind(cls, value: str) -> str:
+        if value not in {"fact", "organizer_interpretation", "temporary_variant"}:
+            raise ValueError("记录类型无效")
+        return value
+
+    @field_validator("content")
+    @classmethod
+    def strip_content(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("字段不能为空")
+        return value
+
+
+class ActualParticipantResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    planned_account_id: UUID | None = Field(serialization_alias="plannedAccountId")
+    email: str | None
+    temporary_code: str | None = Field(serialization_alias="temporaryCode")
+    seat_or_faction: str | None = Field(serialization_alias="seatOrFaction")
+    score_or_outcome: str | None = Field(serialization_alias="scoreOrOutcome")
+
+
+class ActualMaterialResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    rule_name: str = Field(serialization_alias="ruleName")
+    rule_description: str | None = Field(serialization_alias="ruleDescription")
+    rule_content: str = Field(serialization_alias="ruleContent")
+    change_reason: str | None = Field(serialization_alias="changeReason")
+    materials: list[MaterialResponseData]
+
+
+class ObservationResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: UUID
+    kind: str
+    content: str
+    recorded_by_account_id: UUID = Field(serialization_alias="recordedByAccountId")
+    recorded_by_email: str = Field(serialization_alias="recordedByEmail")
+    recorded_at: str = Field(serialization_alias="recordedAt")
+
+
+class ResultResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    session: SessionResponseData
+    actual_headcount: int | None = Field(serialization_alias="actualHeadcount")
+    actual_duration_minutes: int | None = Field(
+        serialization_alias="actualDurationMinutes"
+    )
+    completion_status: str | None = Field(serialization_alias="completionStatus")
+    material_candidates: list[MaterialResponseData] = Field(
+        serialization_alias="materialCandidates"
+    )
+    actual_material: ActualMaterialResponseData | None = Field(
+        serialization_alias="actualMaterial"
+    )
+    actual_participants: list[ActualParticipantResponseData] = Field(
+        serialization_alias="actualParticipants"
+    )
+    observations: list[ObservationResponseData]
+
+
+class ObservationMutationResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    observation: ObservationResponseData
+    revision: int
+
+
 def _authenticated_account(
     token: Annotated[str, Depends(_bearer_token)], session: Session = Depends(get_db)
 ) -> Account:
@@ -259,6 +418,86 @@ def _session_response(data: service.SessionData) -> SessionResponseData:
     )
 
 
+def _observation_response(
+    data: evidence_service.ObservationData,
+) -> ObservationResponseData:
+    return ObservationResponseData(
+        id=data.id,
+        kind=data.kind,
+        content=data.content,
+        recorded_by_account_id=data.recorded_by_account_id,
+        recorded_by_email=data.recorded_by_email,
+        recorded_at=data.recorded_at.isoformat(),
+    )
+
+
+def _result_response(data: service.ResultData) -> ResultResponseData:
+    return ResultResponseData(
+        session=_session_response(data.session),
+        actual_headcount=data.actual_headcount,
+        actual_duration_minutes=data.actual_duration_minutes,
+        completion_status=data.completion_status,
+        material_candidates=[
+            _material_response(material) for material in data.material_candidates
+        ],
+        actual_material=(
+            ActualMaterialResponseData(
+                rule_name=data.actual_material.rule_name,
+                rule_description=data.actual_material.rule_description,
+                rule_content=data.actual_material.rule_content,
+                change_reason=data.actual_material.change_reason,
+                materials=[
+                    _material_response(material)
+                    for material in data.actual_material.materials
+                ],
+            )
+            if data.actual_material is not None
+            else None
+        ),
+        actual_participants=[
+            ActualParticipantResponseData(
+                planned_account_id=participant.planned_account_id,
+                email=participant.email,
+                temporary_code=participant.temporary_code,
+                seat_or_faction=participant.seat_or_faction,
+                score_or_outcome=participant.score_or_outcome,
+            )
+            for participant in data.actual_participants
+        ],
+        observations=[
+            _observation_response(observation) for observation in data.observations
+        ],
+    )
+
+
+def _result_draft(data: ResultRequest) -> service.ResultDraft:
+    return service.ResultDraft(
+        actual_headcount=data.actual_headcount,
+        actual_duration_minutes=data.actual_duration_minutes,
+        completion_status=data.completion_status,
+        actual_material=(
+            service.ActualMaterialDraft(
+                rule_name=data.actual_material.rule_name,
+                rule_description=data.actual_material.rule_description,
+                rule_content=data.actual_material.rule_content,
+                material_file_ids=tuple(data.actual_material.material_file_ids),
+                change_reason=data.actual_material.change_reason,
+            )
+            if data.actual_material is not None
+            else None
+        ),
+        actual_participants=tuple(
+            service.ActualParticipantDraft(
+                planned_account_id=participant.planned_account_id,
+                temporary_code=participant.temporary_code,
+                seat_or_faction=participant.seat_or_faction,
+                score_or_outcome=participant.score_or_outcome,
+            )
+            for participant in data.actual_participants
+        ),
+    )
+
+
 def _plan_response(data: service.PlanData) -> PlanResponseData:
     return PlanResponseData(
         id=data.id,
@@ -311,6 +550,8 @@ def _playtest_error(error: Exception) -> None:
         raise api_error(
             422, "所选场次材料或安排不可用", "material_selection_invalid"
         ) from error
+    if isinstance(error, service.PlaytestResultInvalid):
+        raise api_error(422, "场次结果内容有误", "playtest_result_invalid") from error
     if isinstance(error, service.PlaytestSessionRevisionConflict):
         raise api_error(
             409,
@@ -567,6 +808,138 @@ def cancel_session(
         _playtest_error(error)
         raise
     return ApiResponse(code=200, message="试玩场次已取消", data=_session_response(item))
+
+
+@router.get(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-sessions/{session_id}/result",
+    response_model=ApiResponse[ResultResponseData],
+    summary="读取试玩场次结果",
+)
+def read_result(
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[ResultResponseData]:
+    try:
+        result = service.read_result(
+            session, account.id, workspace_id, work_id, session_id
+        )
+    except Exception as error:
+        _playtest_error(error)
+        raise
+    return ApiResponse(
+        code=200, message="场次结果已加载", data=_result_response(result)
+    )
+
+
+@router.put(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-sessions/{session_id}/result",
+    response_model=ApiResponse[ResultResponseData],
+    summary="保存试玩场次结果",
+)
+def save_result(
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    request: ResultRequest,
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[ResultResponseData]:
+    try:
+        result = service.save_result(
+            session,
+            account.id,
+            workspace_id,
+            work_id,
+            session_id,
+            request.expected_revision,
+            _result_draft(request),
+        )
+    except Exception as error:
+        _playtest_error(error)
+        raise
+    return ApiResponse(
+        code=200, message="场次结果已保存", data=_result_response(result)
+    )
+
+
+@router.post(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-sessions/{session_id}/result/observations",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ApiResponse[ObservationMutationResponseData],
+    summary="新增场次现场记录",
+)
+def create_observation(
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    request: ObservationRequest,
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[ObservationMutationResponseData]:
+    try:
+        result = service.create_observation(
+            session,
+            account.id,
+            workspace_id,
+            work_id,
+            session_id,
+            request.expected_revision,
+            request.kind,
+            request.content,
+        )
+    except Exception as error:
+        _playtest_error(error)
+        raise
+    return ApiResponse(
+        code=201,
+        message="现场记录已保存",
+        data=ObservationMutationResponseData(
+            observation=_observation_response(result.observation),
+            revision=result.revision,
+        ),
+    )
+
+
+@router.patch(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-sessions/{session_id}/result/observations/{observation_id}",
+    response_model=ApiResponse[ObservationMutationResponseData],
+    summary="修正场次现场记录",
+)
+def update_observation(
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    observation_id: UUID,
+    request: ObservationRequest,
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[ObservationMutationResponseData]:
+    try:
+        result = service.update_observation(
+            session,
+            account.id,
+            workspace_id,
+            work_id,
+            session_id,
+            observation_id,
+            request.expected_revision,
+            request.kind,
+            request.content,
+        )
+    except Exception as error:
+        _playtest_error(error)
+        raise
+    return ApiResponse(
+        code=200,
+        message="现场记录已修正",
+        data=ObservationMutationResponseData(
+            observation=_observation_response(result.observation),
+            revision=result.revision,
+        ),
+    )
 
 
 @router.get(
