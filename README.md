@@ -8,11 +8,11 @@
 
 - Python 3.12 或更高版本
 - uv
-- 项目已绑定的 PostgreSQL；执行完整测试时使用隔离测试库
+- 工作区统一 PostgreSQL `127.0.0.1:5432`；执行完整测试时使用隔离的 `rulefolio_test`
 
 ## 快速开始
 
-本机开发 `.env` 需要同时配置 API/邮件运行身份 `DB_*` 和仅供 Alembic 使用的 schema owner `MIGRATOR_DB_*`；两者不得复用。新环境才需要从公开示例创建配置，并填写该环境已经分配的真实资源绑定：
+本机开发 `.env` 需要同时配置 API/邮件运行身份 `DB_*` 和仅供 Alembic 使用的 schema owner `MIGRATOR_DB_*`；两者不得复用。数据库本身由不可登录的 `rulefolio_owner` 持有，不进入应用配置。新环境才需要从公开示例创建配置，并填写该环境已经分配的真实资源绑定：
 
 ```bash
 uv sync --locked
@@ -47,7 +47,7 @@ API 文档默认位于：
 
 `.env` 保存受保护的本机开发配置，公开键合同见 `.env.example`：
 
-- `DB_*` 与 `TEST_DB_NAME`：API 与邮件派发的非 owner 开发库和隔离测试库身份；当前代码已经消费 `DB_*`。
+- `DB_*`：API 与邮件派发使用的非 owner 运行身份；当前开发库为 `rulefolio_dev`。`TEST_DB_NAME` 只记录隔离测试库名称，不会自动替换 `DB_NAME`。
 - `MIGRATOR_DB_*`：仅 Alembic 使用的 schema owner 身份；应用运行配置不得使用它。
 - `APP_*`、`API_PREFIX`、`ENABLE_API_DOCS`、`LOG_LEVEL`、`CORS_ORIGINS`：应用、文档、日志和前端联调设置。
 - `PASSWORD_*`、`ARGON2_*`、`SESSION_TTL_HOURS`、`ONE_TIME_TOKEN_TTL_MINUTES`、`*_MAX_ATTEMPTS`、`AUTH_ATTEMPT_*`、`RECOVERY_RESPONSE_MIN_DURATION_MS`、`RECOVERY_JOB_STALE_MINUTES`：服务端认证安全参数。
@@ -123,8 +123,8 @@ uv run --locked pytest
 uv build
 ```
 
-默认测试会验证配置、错误响应、探针、中间件、请求 ID、认证 HTTP 契约和数据库 Session 生命周期。只有显式把隔离测试库的 `DB_*` 注入进程环境时，PostgreSQL 集成测试才会执行；未执行时 pytest 会明确显示跳过。
+默认测试会验证配置、错误响应、探针、中间件、请求 ID、认证 HTTP 契约和数据库 Session 生命周期。执行 PostgreSQL 集成测试时，保持 Settings 从 `.env` 读取配置，只把所需 `DB_*` 原值显式注入进程环境，并将 `DB_NAME` 指向 `TEST_DB_NAME`；不要在 shell 中 `source .env`，否则会破坏 `CORS_ORIGINS` 等 JSON 值。pytest 摘要不得显示 PostgreSQL 用例因配置缺失而跳过。
 
-`uv run --locked alembic upgrade head` 仅使用 `MIGRATOR_DB_*` 连接 schema owner；升级后的 API 与派发进程仅使用 `DB_*`。迁移必须在可丢弃的隔离测试库先完成验证。`uv build` 在 `dist/` 生成 wheel 和 sdist；该目录是本地构建产物，不提交。
+`uv run --locked alembic upgrade head` 仅使用 `MIGRATOR_DB_*` 连接 `rulefolio_migrator` schema owner；升级后的 API 与派发进程仅使用 `DB_*` 的 `rulefolio_app`。两个身份通过 SCRAM 只能连接工作区统一 5432 上的 Rulefolio 开发库和测试库，database owner `rulefolio_owner` 不可登录。迁移必须在可丢弃的隔离测试库先完成验证。`uv build` 在 `dist/` 生成 wheel 和 sdist；该目录是本地构建产物，不提交。
 
 开发规则见 [AGENTS.md](AGENTS.md)，API、数据库和基础设施约束见 [`.claude/rules/`](.claude/rules/)。
