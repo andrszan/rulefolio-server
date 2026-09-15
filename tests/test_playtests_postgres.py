@@ -1,20 +1,27 @@
 import smtplib
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import select, text, update
 
-from app.access.context import set_actor, set_workspace_management_scope
+from app.access.context import (
+    set_actor,
+    set_work_management_scope,
+    set_workspace_management_scope,
+)
 from app.core.config import settings
 from app.core.database import SessionLocal
 from app.evidence import service as evidence_service
 from app.evidence.models import PlaytestObservation
 from app.files import service as files_service
 from app.identity.models import Account
+from app.issues import service as issues_service
+from app.issues.models import IssueEvidenceLink
 from app.notifications import dispatcher
 from app.notifications.models import MailOutbox
 from app.notifications.service import enqueue_business_mail, suppress_business_mails
@@ -813,3 +820,263 @@ def test_feedback_keeps_drafts_private_locks_items_and_updates_current_answers(
             )
         session.rollback()
         assert started.status == "started"
+
+
+def test_issue_linked_direct_feedback_cannot_return_to_draft(
+    prepared_playtest: tuple[object, ...],
+) -> None:
+    (
+        owner,
+        organizer,
+        guest,
+        _,
+        _,
+        workspace,
+        work,
+        first,
+        _,
+        _,
+        session_id,
+        _,
+    ) = prepared_playtest
+
+    with SessionLocal() as session:
+        item = playtests_service.create_feedback_item(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            "linked-feedback-item",
+            evidence_service.FeedbackItemDraft(
+                kind="short_text", question="路线提示是否清晰？", options=()
+            ),
+        )
+        started = playtests_service.start_session(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            playtests_service.read_managed_session(
+                session, organizer, workspace, work.id, session_id
+            ).revision,
+        )
+        submitted = playtests_service.save_participant_feedback(
+            session,
+            guest,
+            session_id,
+            "linked-feedback-create",
+            None,
+            evidence_service.FeedbackSubmissionDraft(
+                source="direct",
+                temporary_alias=None,
+                status="submitted",
+                answers=(
+                    evidence_service.FeedbackAnswerDraft(
+                        item_id=item.id, text_value="路线提示需要更多示例。"
+                    ),
+                ),
+            ),
+        )
+        issue = issues_service.create_issue(
+            session,
+            owner,
+            workspace,
+            work.id,
+            "linked-feedback-issue",
+            description="路线提示的说明仍需调整。",
+            decision="modify",
+            reason="已提交反馈指出理解障碍。",
+            status="open",
+            references=(
+                evidence_service.IssueEvidenceReference(
+                    source_type="feedback_submission", source_id=submitted.id
+                ),
+            ),
+        )
+
+        with pytest.raises(evidence_service.FeedbackSubmissionLinked):
+            playtests_service.save_participant_feedback(
+                session,
+                guest,
+                session_id,
+                None,
+                submitted.revision,
+                evidence_service.FeedbackSubmissionDraft(
+                    source="direct",
+                    temporary_alias=None,
+                    status="draft",
+                    answers=(
+                        evidence_service.FeedbackAnswerDraft(
+                            item_id=item.id, text_value="路线提示需要更多示例。"
+                        ),
+                    ),
+                ),
+            )
+
+        current = playtests_service.read_participant_session(session, guest, session_id)
+        assert current.own_feedback is not None
+        assert current.own_feedback.status == "submitted"
+        evidence, total = issues_service.list_issue_evidence(
+            session, owner, workspace, work.id, issue.id, 1, 20
+        )
+        assert started.status == "started"
+        assert total == 1
+        assert evidence[0].source.source_id == submitted.id
+
+
+def test_feedback_link_and_draft_race_preserves_submitted(
+    prepared_playtest: tuple[object, ...],
+) -> None:
+    (
+        owner,
+        organizer,
+        guest,
+        _,
+        _,
+        workspace,
+        work,
+        _,
+        _,
+        _,
+        session_id,
+        _,
+    ) = prepared_playtest
+
+    with SessionLocal() as session:
+        item = playtests_service.create_feedback_item(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            "linked-feedback-race-item",
+            evidence_service.FeedbackItemDraft(
+                kind="short_text", question="路线提示是否清晰？", options=()
+            ),
+        )
+        started = playtests_service.start_session(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            playtests_service.read_managed_session(
+                session, organizer, workspace, work.id, session_id
+            ).revision,
+        )
+        observation = playtests_service.create_observation(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            started.revision,
+            "fact",
+            "参与者在路线选择时停顿并请求说明。",
+        )
+        submitted = playtests_service.save_participant_feedback(
+            session,
+            guest,
+            session_id,
+            "linked-feedback-race-create",
+            None,
+            evidence_service.FeedbackSubmissionDraft(
+                source="direct",
+                temporary_alias=None,
+                status="submitted",
+                answers=(
+                    evidence_service.FeedbackAnswerDraft(
+                        item_id=item.id, text_value="路线提示需要更多示例。"
+                    ),
+                ),
+            ),
+        )
+        issue = issues_service.create_issue(
+            session,
+            owner,
+            workspace,
+            work.id,
+            "linked-feedback-race-issue",
+            description="路线提示的说明仍需调整。",
+            decision="modify",
+            reason="现场观察指出理解障碍。",
+            status="open",
+            references=(
+                evidence_service.IssueEvidenceReference(
+                    source_type="observation", source_id=observation.observation.id
+                ),
+            ),
+        )
+
+    link_flushed = Event()
+    allow_link_commit = Event()
+    draft_started = Event()
+
+    def link_feedback() -> str:
+        with SessionLocal() as session:
+            set_actor(session, owner)
+            set_work_management_scope(session, work.id, workspace)
+            session.add(
+                IssueEvidenceLink(
+                    issue_id=issue.id, feedback_submission_id=submitted.id
+                )
+            )
+            session.flush()
+            link_flushed.set()
+            assert allow_link_commit.wait(timeout=5)
+            session.commit()
+        return "linked"
+
+    def draft_feedback() -> str:
+        assert link_flushed.wait(timeout=5)
+        with SessionLocal() as session:
+            draft_started.set()
+            try:
+                playtests_service.save_participant_feedback(
+                    session,
+                    guest,
+                    session_id,
+                    None,
+                    submitted.revision,
+                    evidence_service.FeedbackSubmissionDraft(
+                        source="direct",
+                        temporary_alias=None,
+                        status="draft",
+                        answers=(
+                            evidence_service.FeedbackAnswerDraft(
+                                item_id=item.id, text_value="路线提示需要更多示例。"
+                            ),
+                        ),
+                    ),
+                )
+            except evidence_service.FeedbackSubmissionLinked:
+                return "linked"
+        return "drafted"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        link = executor.submit(link_feedback)
+        assert link_flushed.wait(timeout=5)
+        draft = executor.submit(draft_feedback)
+        assert draft_started.wait(timeout=5)
+        try:
+            with pytest.raises(FutureTimeoutError):
+                draft.result(timeout=1)
+        finally:
+            allow_link_commit.set()
+        assert link.result(timeout=5) == "linked"
+        assert draft.result(timeout=5) == "linked"
+
+    with SessionLocal() as session:
+        current = playtests_service.read_participant_session(session, guest, session_id)
+        assert current.own_feedback is not None
+        assert current.own_feedback.status == "submitted"
+        evidence, total = issues_service.list_issue_evidence(
+            session, owner, workspace, work.id, issue.id, 1, 20
+        )
+        assert total == 2
+        assert {item.source.source_id for item in evidence} == {
+            observation.observation.id,
+            submitted.id,
+        }

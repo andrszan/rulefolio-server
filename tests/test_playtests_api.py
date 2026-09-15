@@ -246,6 +246,32 @@ def test_feedback_submission_response_includes_current_recorder(
     assert response.json()["data"]["recordedByAccountId"] == str(account.id)
 
 
+def test_linked_direct_feedback_uses_conflict_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = Account(id=uuid4(), email="guest@example.com", status="active")
+    _authorize(monkeypatch, account)
+    monkeypatch.setattr(
+        service,
+        "save_participant_feedback",
+        lambda *_: (_ for _ in ()).throw(evidence_service.FeedbackSubmissionLinked),
+    )
+
+    with TestClient(app) as client:
+        response = client.put(
+            f"/api/v1/playtest-sessions/{uuid4()}/feedback/mine",
+            headers={"Authorization": "Bearer session-token"},
+            json={
+                "status": "draft",
+                "expectedRevision": 1,
+                "answers": [{"itemId": str(uuid4()), "textValue": "当前答案"}],
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["data"] == {"reason": "feedback_submission_linked"}
+
+
 def test_openapi_includes_feedback_contract() -> None:
     with TestClient(app) as client:
         schema = client.get("/api/v1/openapi.json").json()

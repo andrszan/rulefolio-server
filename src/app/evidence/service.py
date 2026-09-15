@@ -6,7 +6,14 @@ from uuid import UUID
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
-from app.access.context import set_feedback_answer_item_lock_scope
+from app.access.context import (
+    set_feedback_answer_item_lock_scope,
+    set_issue_evidence_candidate_feedback_submission_scope,
+    set_issue_evidence_candidate_observation_scope,
+    set_issue_evidence_scope,
+    set_playtest_management_scope,
+    set_playtest_session_scope,
+)
 from app.evidence.models import (
     PlaytestFeedbackAnswer,
     PlaytestFeedbackItem,
@@ -15,12 +22,58 @@ from app.evidence.models import (
     PlaytestObservation,
 )
 from app.identity.models import Account
+from app.playtests.models import PlaytestSession
 
 OBSERVATION_KINDS = {"fact", "organizer_interpretation", "temporary_variant"}
 
 
 class ObservationInvalid(Exception):
     pass
+
+
+class IssueEvidenceInvalid(Exception):
+    pass
+
+
+class IssueEvidenceUnavailable(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class IssueEvidenceReference:
+    source_type: str
+    source_id: UUID
+
+
+@dataclass(frozen=True)
+class IssueEvidenceAnswerData:
+    item_id: UUID
+    kind: str
+    question: str
+    text_value: str | None
+    option_id: UUID | None
+    option_label: str | None
+    number_value: float | None
+
+
+@dataclass(frozen=True)
+class IssueEvidenceSourceData:
+    source_type: str
+    source_id: UUID
+    session_id: UUID
+    session_status: str
+    location: str
+    scheduled_at: datetime
+    started_at: datetime | None
+    kind: str | None
+    content: str | None
+    source: str | None
+    temporary_alias: str | None
+    recorded_by_account_id: UUID
+    recorded_by_email: str
+    recorded_at: datetime | None
+    updated_at: datetime | None
+    answers: tuple[IssueEvidenceAnswerData, ...]
 
 
 class ObservationUnavailable(Exception):
@@ -80,6 +133,216 @@ def list_observations(
                 PlaytestObservation.recorded_at,
                 PlaytestObservation.id,
             )
+        )
+    )
+
+
+def _issue_session_context(session: Session, session_id: UUID) -> PlaytestSession:
+    set_playtest_session_scope(session, session_id)
+    item = session.scalar(
+        select(PlaytestSession).where(PlaytestSession.id == session_id)
+    )
+    if item is None:
+        raise IssueEvidenceUnavailable
+    return item
+
+
+def validate_issue_evidence_sources(
+    session: Session,
+    workspace_id: UUID,
+    work_id: UUID,
+    references: tuple[IssueEvidenceReference, ...],
+) -> tuple[IssueEvidenceReference, ...]:
+    if not references or len(set(references)) != len(references):
+        raise IssueEvidenceInvalid
+    set_playtest_management_scope(session, workspace_id, work_id)
+    for reference in references:
+        if reference.source_type == "observation":
+            set_issue_evidence_candidate_observation_scope(session, reference.source_id)
+            source = session.scalar(
+                select(PlaytestObservation).where(
+                    PlaytestObservation.id == reference.source_id
+                )
+            )
+            if source is None:
+                raise IssueEvidenceUnavailable
+            source_session_id = source.session_id
+        elif reference.source_type == "feedback_submission":
+            set_issue_evidence_candidate_feedback_submission_scope(
+                session, reference.source_id
+            )
+            source = session.scalar(
+                select(PlaytestFeedbackSubmission).where(
+                    PlaytestFeedbackSubmission.id == reference.source_id,
+                    PlaytestFeedbackSubmission.status == "submitted",
+                )
+            )
+            if source is None:
+                raise IssueEvidenceUnavailable
+            source_session_id = source.session_id
+        else:
+            raise IssueEvidenceInvalid
+        source_session = _issue_session_context(session, source_session_id)
+        if (
+            source_session.workspace_id != workspace_id
+            or source_session.work_id != work_id
+        ):
+            raise IssueEvidenceUnavailable
+    return references
+
+
+def _issue_feedback_answers(
+    session: Session, submission_ids: set[UUID]
+) -> dict[UUID, tuple[IssueEvidenceAnswerData, ...]]:
+    answers = list(
+        session.scalars(
+            select(PlaytestFeedbackAnswer)
+            .where(PlaytestFeedbackAnswer.submission_id.in_(submission_ids))
+            .order_by(
+                PlaytestFeedbackAnswer.submission_id, PlaytestFeedbackAnswer.item_id
+            )
+        )
+    )
+    item_ids = {answer.item_id for answer in answers}
+    items = {
+        item.id: item
+        for item in session.scalars(
+            select(PlaytestFeedbackItem).where(PlaytestFeedbackItem.id.in_(item_ids))
+        )
+    }
+    option_ids = {
+        answer.option_id for answer in answers if answer.option_id is not None
+    }
+    options = {
+        option.id: option
+        for option in session.scalars(
+            select(PlaytestFeedbackOption).where(
+                PlaytestFeedbackOption.id.in_(option_ids)
+            )
+        )
+    }
+    result: dict[UUID, list[IssueEvidenceAnswerData]] = {
+        submission_id: [] for submission_id in submission_ids
+    }
+    for answer in answers:
+        item = items.get(answer.item_id)
+        if item is None:
+            raise IssueEvidenceUnavailable
+        option = options.get(answer.option_id) if answer.option_id is not None else None
+        if answer.option_id is not None and option is None:
+            raise IssueEvidenceUnavailable
+        result[answer.submission_id].append(
+            IssueEvidenceAnswerData(
+                item_id=answer.item_id,
+                kind=answer.kind,
+                question=item.question,
+                text_value=answer.text_value,
+                option_id=answer.option_id,
+                option_label=option.label if option is not None else None,
+                number_value=answer.number_value,
+            )
+        )
+    return {submission_id: tuple(entries) for submission_id, entries in result.items()}
+
+
+def read_linked_issue_evidence(
+    session: Session,
+    issue_id: UUID,
+    references: tuple[IssueEvidenceReference, ...],
+) -> tuple[IssueEvidenceSourceData, ...]:
+    set_issue_evidence_scope(session, issue_id)
+    observation_ids = {
+        reference.source_id
+        for reference in references
+        if reference.source_type == "observation"
+    }
+    feedback_submission_ids = {
+        reference.source_id
+        for reference in references
+        if reference.source_type == "feedback_submission"
+    }
+    result: list[IssueEvidenceSourceData] = []
+    if observation_ids:
+        observations = list(
+            session.execute(
+                select(PlaytestObservation, Account.email)
+                .join(Account, Account.id == PlaytestObservation.recorded_by_account_id)
+                .where(PlaytestObservation.id.in_(observation_ids))
+            )
+        )
+        if len(observations) != len(observation_ids):
+            raise IssueEvidenceUnavailable
+        for observation, email in observations:
+            source_session = _issue_session_context(session, observation.session_id)
+            result.append(
+                IssueEvidenceSourceData(
+                    source_type="observation",
+                    source_id=observation.id,
+                    session_id=source_session.id,
+                    session_status=source_session.status,
+                    location=source_session.location,
+                    scheduled_at=source_session.scheduled_at,
+                    started_at=source_session.started_at,
+                    kind=observation.kind,
+                    content=observation.content,
+                    source=None,
+                    temporary_alias=None,
+                    recorded_by_account_id=observation.recorded_by_account_id,
+                    recorded_by_email=email,
+                    recorded_at=observation.recorded_at,
+                    updated_at=None,
+                    answers=(),
+                )
+            )
+    if feedback_submission_ids:
+        submissions = list(
+            session.execute(
+                select(PlaytestFeedbackSubmission, Account.email)
+                .join(
+                    Account,
+                    Account.id == PlaytestFeedbackSubmission.recorded_by_account_id,
+                )
+                .where(
+                    PlaytestFeedbackSubmission.id.in_(feedback_submission_ids),
+                    PlaytestFeedbackSubmission.status == "submitted",
+                )
+            )
+        )
+        if len(submissions) != len(feedback_submission_ids):
+            raise IssueEvidenceUnavailable
+        answers_by_submission = _issue_feedback_answers(
+            session, feedback_submission_ids
+        )
+        for submission, email in submissions:
+            source_session = _issue_session_context(session, submission.session_id)
+            result.append(
+                IssueEvidenceSourceData(
+                    source_type="feedback_submission",
+                    source_id=submission.id,
+                    session_id=source_session.id,
+                    session_status=source_session.status,
+                    location=source_session.location,
+                    scheduled_at=source_session.scheduled_at,
+                    started_at=source_session.started_at,
+                    kind=None,
+                    content=None,
+                    source=submission.source,
+                    temporary_alias=submission.temporary_alias,
+                    recorded_by_account_id=submission.recorded_by_account_id,
+                    recorded_by_email=email,
+                    recorded_at=None,
+                    updated_at=submission.updated_at,
+                    answers=answers_by_submission[submission.id],
+                )
+            )
+    return tuple(
+        sorted(
+            result,
+            key=lambda item: (
+                item.updated_at if item.updated_at is not None else item.recorded_at,
+                str(item.source_id),
+            ),
+            reverse=True,
         )
     )
 
@@ -166,6 +429,10 @@ class FeedbackSubmissionForbidden(Exception):
 
 
 class FeedbackSubmissionRevisionConflict(Exception):
+    pass
+
+
+class FeedbackSubmissionLinked(Exception):
     pass
 
 

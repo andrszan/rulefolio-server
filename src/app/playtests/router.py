@@ -825,6 +825,12 @@ def _feedback_error(error: Exception) -> None:
         raise api_error(
             403, "当前会话不能更正该条整理", "feedback_submission_forbidden"
         ) from error
+    if isinstance(error, evidence_service.FeedbackSubmissionLinked):
+        raise api_error(
+            409,
+            "这份反馈已关联问题，仍可更正后重新提交",
+            "feedback_submission_linked",
+        ) from error
     if isinstance(error, service.PlaytestSessionStateInvalid):
         raise api_error(
             409, "当前场次状态不允许此操作", "feedback_session_state_invalid"

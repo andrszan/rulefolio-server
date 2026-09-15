@@ -2,7 +2,7 @@
 
 本仓库是好玩实验室（`rulefolio`）的 API 服务，使用 FastAPI、同步 SQLAlchemy 2.x、Psycopg 3、PostgreSQL、Alembic、Pydantic v2、pytest 和 Ruff。
 
-当前已提供应用配置、数据库连接、请求日志、错误响应、CORS、`/health`、`/ready`，以及账户开通、Argon2id 密码、opaque session、恢复凭据、Outbox 和 SMTP 派发能力；还包括私有工作空间、成员、邮件邀请及邀请兑换，以及默认私有的作品、基础资料更新、作品级访问控制、作品图片和唯一当前规则材料的上传、列表、预览与下载。维护者和组织者可创建试玩计划、安排场次、固定规则与材料快照、邀请已有激活账户、修改安排、开始或取消场次；已开始场次可保存实际规则和材料快照、实际参与、人数、时长、完成状态以及现场记录，并可设计题目和整理已提交反馈。受邀账户仅能读取自己的场次和固定材料并确认参加；场次开始后可保存、提交或更正自己的直接反馈，草稿不向管理者或其他参与者公开。维护者保存规则名称、可选说明、正文和完整当前材料集合；组织者与协作者只能读取当前关联的材料。项目维护者可从空的项目数据库与私有桶创建交付基线，或经明确确认重置该项目范围。草稿、发布、版本历史和问题能力尚未实现。
+当前已提供应用配置、数据库连接、请求日志、错误响应、CORS、`/health`、`/ready`，以及账户开通、Argon2id 密码、opaque session、恢复凭据、Outbox 和 SMTP 派发能力；还包括私有工作空间、成员、邮件邀请及邀请兑换，以及默认私有的作品、基础资料更新、作品级访问控制、作品图片和唯一当前规则材料的上传、列表、预览与下载。维护者和组织者可创建试玩计划、安排场次、固定规则与材料快照、邀请已有激活账户、修改安排、开始或取消场次；已开始场次可保存实际规则和材料快照、实际参与、人数、时长、完成状态以及现场记录，并可设计题目和整理已提交反馈。维护者可从现场观察和已提交反馈归纳问题，记录当前处理决定、理由和状态，并维护关联来源；来源读取始终使用其当前内容。受邀账户仅能读取自己的场次和固定材料并确认参加；场次开始后可保存、提交或更正自己的直接反馈，草稿不向管理者或其他参与者公开。维护者保存规则名称、可选说明、正文和完整当前材料集合；组织者与协作者只能读取当前关联的材料。项目维护者可从空的项目数据库与私有桶创建交付基线，或经明确确认重置该项目范围。版本历史以及调整说明、复测和结论尚未实现。
 
 ## 环境要求
 
@@ -117,6 +117,7 @@ src/app/
 ├── api.py                 # 业务 API 聚合
 ├── files/                 # 私有图片与材料的检测、对象生命周期与 HTTP router
 ├── identity/              # 账户、密码、session 与一次性凭据
+├── issues/                # 问题当前判断、来源关联与维护者专属 API
 ├── notifications/         # 凭据与冻结业务邮件的 Outbox、SMTP adapter 与派发状态
 ├── playtests/             # 测试计划、场次快照、参与确认与受限材料读取
 ├── workspaces/            # 工作空间、成员、邀请、兑换与作品访问关系
@@ -130,7 +131,7 @@ src/app/
 └── main.py                # 应用装配
 ```
 
-业务 router 通过 `src/app/api.py` 聚合，并由 `API_PREFIX` 统一挂载。业务成功响应使用 `ApiResponse[T]`；`/health` 与 `/ready` 不使用业务响应包装。数据库 Schema 只通过 Alembic 变更，不在启动时调用 `create_all()` 或自动迁移。认证 API 位于 `/sessions`、`/sessions/current`、`/account-recovery-requests`、`/account-activations/exchanges` 和 `/account-recovery-exchanges`；工作空间及作品 API 位于 `/workspaces` 与其下的 `/works`，图片 API 位于作品路径下的 `/images`，当前规则材料 API 位于 `/rule-materials` 与 `/material-files`，试玩计划管理 API 位于作品路径下的 `/playtest-plans` 和 `/playtest-sessions`，受邀者入口位于 `/playtest-sessions/{sessionId}`，邀请兑换位于 `/workspace-invitation-exchanges`。作品、当前规则和当前材料只向同时具有当前工作空间成员资格与作品访问关系的账户返回；维护者才可更新资料、保存规则材料或读取材料候选；维护者和组织者可管理试玩，受邀试玩者不因此获得作品或工作空间权限。工作空间邀请使用 `Idempotency-Key`，token 仅可放在兑换请求体。具体字段和错误 reason 以 OpenAPI 为准。
+业务 router 通过 `src/app/api.py` 聚合，并由 `API_PREFIX` 统一挂载。业务成功响应使用 `ApiResponse[T]`；`/health` 与 `/ready` 不使用业务响应包装。数据库 Schema 只通过 Alembic 变更，不在启动时调用 `create_all()` 或自动迁移。认证 API 位于 `/sessions`、`/sessions/current`、`/account-recovery-requests`、`/account-activations/exchanges` 和 `/account-recovery-exchanges`；工作空间及作品 API 位于 `/workspaces` 与其下的 `/works`，图片 API 位于作品路径下的 `/images`，当前规则材料 API 位于 `/rule-materials` 与 `/material-files`，试玩计划管理 API 位于作品路径下的 `/playtest-plans` 和 `/playtest-sessions`，问题 API 位于作品路径下的 `/issues`，仅维护者可读取或维护，受邀者入口位于 `/playtest-sessions/{sessionId}`，邀请兑换位于 `/workspace-invitation-exchanges`。作品、当前规则和当前材料只向同时具有当前工作空间成员资格与作品访问关系的账户返回；维护者才可更新资料、保存规则材料或读取材料候选；维护者和组织者可管理试玩，受邀试玩者不因此获得作品或工作空间权限。工作空间邀请使用 `Idempotency-Key`，token 仅可放在兑换请求体。具体字段和错误 reason 以 OpenAPI 为准。
 
 ## 验证与构建
 

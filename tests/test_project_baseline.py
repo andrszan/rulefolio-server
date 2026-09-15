@@ -18,6 +18,7 @@ from app.files import storage
 from app.files.models import StoredFile
 from app.identity import service as identity_service
 from app.identity.models import Account, OneTimeCredential, SessionRecord
+from app.issues.models import Issue, IssueEvidenceLink
 from app.notifications.models import MailOutbox
 from app.playtests.models import (
     PlaytestPlan,
@@ -72,6 +73,8 @@ def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID, tuple[UUID, ...]]:
         feedback_items = list(session.scalars(select(PlaytestFeedbackItem)))
         feedback_submissions = list(session.scalars(select(PlaytestFeedbackSubmission)))
         feedback_answers = list(session.scalars(select(PlaytestFeedbackAnswer)))
+        issues = list(session.scalars(select(Issue)))
+        issue_evidence_links = list(session.scalars(select(IssueEvidenceLink)))
         assert [account.email for account in accounts] == sorted(
             account.email for account in BASELINE_ACCOUNTS
         )
@@ -94,6 +97,9 @@ def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID, tuple[UUID, ...]]:
         assert len(feedback_items) == 3
         assert len(feedback_submissions) == 2
         assert len(feedback_answers) == 4
+        assert {issue.decision for issue in issues} == {"modify", "observe", "reject"}
+        assert {issue.status for issue in issues} == {"open", "closed"}
+        assert len(issue_evidence_links) == 5
         assert {submission.status for submission in feedback_submissions} == {
             "submitted"
         }

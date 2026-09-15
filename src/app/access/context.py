@@ -77,6 +77,24 @@ def set_feedback_answer_item_lock_scope(session: Session, item_id: UUID) -> None
     _set_scope(session, "app.feedback_answer_item_lock_id", item_id)
 
 
+def set_issue_evidence_scope(session: Session, issue_id: UUID) -> None:
+    _set_scope(session, "app.issue_evidence_id", issue_id)
+
+
+def set_issue_evidence_candidate_observation_scope(
+    session: Session, observation_id: UUID
+) -> None:
+    _set_scope(session, "app.issue_evidence_candidate_observation_id", observation_id)
+
+
+def set_issue_evidence_candidate_feedback_submission_scope(
+    session: Session, submission_id: UUID
+) -> None:
+    _set_scope(
+        session, "app.issue_evidence_candidate_feedback_submission_id", submission_id
+    )
+
+
 def set_project_baseline_scope(session: Session) -> None:
     session.execute(
         text("SELECT set_config('app.project_baseline_maintenance', 'active', true)")

@@ -35,6 +35,8 @@ from app.identity.models import (
     RecoveryRequestJob,
     SessionRecord,
 )
+from app.issues import service as issues_service
+from app.issues.models import Issue, IssueEvidenceLink
 from app.notifications import dispatcher as mail_dispatcher
 from app.notifications.models import MailOutbox
 from app.playtests import service as playtests_service
@@ -168,6 +170,8 @@ def _record_count(session: Session) -> int:
         PlaytestFeedbackOption,
         PlaytestFeedbackItem,
         PlaytestObservation,
+        IssueEvidenceLink,
+        Issue,
         StoredFile,
     )
     return sum(
@@ -202,6 +206,8 @@ def _baseline_counts() -> dict[str, int]:
         "playtest_feedback_items": 3,
         "playtest_feedback_submissions": 2,
         "playtest_feedback_answers": 4,
+        "issues": 3,
+        "issue_evidence_links": 5,
     }
 
 
@@ -414,7 +420,7 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
             "fact",
             "玩家在第三回合前主动分工记录线索。",
         )
-        playtests_service.create_observation(
+        first_interpretation = playtests_service.create_observation(
             session,
             owner.id,
             workspace.id,
@@ -465,7 +471,7 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
                 ),
             ),
         )
-        playtests_service.save_participant_feedback(
+        direct_feedback = playtests_service.save_participant_feedback(
             session,
             playtester.id,
             first_started.id,
@@ -491,7 +497,7 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
                 ),
             ),
         )
-        playtests_service.create_feedback_submission(
+        organizer_feedback = playtests_service.create_feedback_submission(
             session,
             owner.id,
             workspace.id,
@@ -547,7 +553,7 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
                 ),
             ),
         )
-        playtests_service.create_observation(
+        second_variant = playtests_service.create_observation(
             session,
             owner.id,
             workspace.id,
@@ -556,6 +562,63 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
             second_result.session.revision,
             "temporary_variant",
             "因时间不足跳过终局结算，改为口头复盘。",
+        )
+
+        phase = "issues"
+        issues_service.create_issue(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            "baseline-issue-modify",
+            description="终局结算的触发顺序需要补充示例。",
+            decision="modify",
+            reason="直接反馈和现场记录都指向同一理解障碍。",
+            status="open",
+            references=(
+                evidence_service.IssueEvidenceReference(
+                    source_type="observation", source_id=first_fact.observation.id
+                ),
+                evidence_service.IssueEvidenceReference(
+                    source_type="feedback_submission", source_id=direct_feedback.id
+                ),
+            ),
+        )
+        issues_service.create_issue(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            "baseline-issue-observe",
+            description="现有提示对早期协作的引导效果继续观察。",
+            decision="observe",
+            reason="组织者记录显示协作已经较早出现。",
+            status="closed",
+            references=(
+                evidence_service.IssueEvidenceReference(
+                    source_type="observation",
+                    source_id=first_interpretation.observation.id,
+                ),
+                evidence_service.IssueEvidenceReference(
+                    source_type="feedback_submission", source_id=organizer_feedback.id
+                ),
+            ),
+        )
+        issues_service.create_issue(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            "baseline-issue-reject",
+            description="时间不足时跳过终局结算不作为当前规则问题。",
+            decision="reject",
+            reason="该场采用临时变体，不能代表当前规则体验。",
+            status="open",
+            references=(
+                evidence_service.IssueEvidenceReference(
+                    source_type="observation", source_id=second_variant.observation.id
+                ),
+            ),
         )
 
         phase = "audit"
@@ -582,6 +645,8 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
 def _clear_database(session: Session) -> int:
     set_project_baseline_scope(session)
     models = (
+        IssueEvidenceLink,
+        Issue,
         PlaytestFeedbackAnswer,
         PlaytestFeedbackSubmission,
         PlaytestFeedbackOption,

@@ -3,7 +3,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.access.context import (
@@ -1820,9 +1820,17 @@ def save_participant_feedback(
         )
         _commit_or_rollback(session)
         return result
+    except IntegrityError as error:
+        session.rollback()
+        if getattr(getattr(error.orig, "diag", None), "constraint_name", None) == (
+            "ck_linked_feedback_submission_status"
+        ):
+            raise evidence_service.FeedbackSubmissionLinked from error
+        raise PlaytestOperationRetryable from error
     except (
         evidence_service.FeedbackInvalid,
         evidence_service.FeedbackOperationConflict,
+        evidence_service.FeedbackSubmissionLinked,
         evidence_service.FeedbackSubmissionRevisionConflict,
         PlaytestSessionStateInvalid,
         PlaytestUnavailable,
