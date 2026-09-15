@@ -570,6 +570,12 @@ def create_workspace(
     return _workspace_data(workspace, actor_account_id)
 
 
+def add_baseline_member(session: Session, workspace_id: UUID, account_id: UUID) -> None:
+    set_workspace_management_scope(session, workspace_id)
+    session.add(WorkspaceMember(workspace_id=workspace_id, account_id=account_id))
+    session.flush()
+
+
 def list_workspaces(
     session: Session, actor_account_id: UUID, page: int, size: int
 ) -> tuple[list[WorkspaceData], int]:

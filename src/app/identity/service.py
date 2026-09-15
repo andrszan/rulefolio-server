@@ -246,6 +246,19 @@ def get_or_create_invitation_account(session: Session, email: str) -> Account:
     return account
 
 
+def create_active_baseline_account(
+    session: Session, email: str, password: str
+) -> Account:
+    normalized_email = normalize_email(email)
+    if session.scalar(select(Account.id).where(Account.email == normalized_email)):
+        raise ValueError("交付账户已经存在")
+    account = Account(email=normalized_email, status=ACTIVE)
+    session.add(account)
+    session.flush()
+    _set_password(session, account.id, password)
+    return account
+
+
 def issue_workspace_invitation_credential(
     session: Session, account: Account
 ) -> tuple[OneTimeCredential, str]:

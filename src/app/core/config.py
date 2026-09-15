@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     token_encryption_key: SecretStr = SecretStr("")
     token_encryption_key_version: int = Field(default=1, ge=1)
     auth_attempt_pepper: SecretStr = SecretStr("")
+    baseline_password: SecretStr = SecretStr("")
     s3_endpoint: str = ""
     s3_region: str = "us-east-1"
     s3_access_key_id: str = ""

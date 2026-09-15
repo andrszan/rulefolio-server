@@ -9,7 +9,8 @@ from app.files.policy import S3_TIMEOUT_SECONDS
 
 
 class StorageUnavailable(Exception):
-    pass
+    def __init__(self, deleted: int = 0) -> None:
+        self.deleted = deleted
 
 
 def _client() -> BaseClient:
@@ -68,3 +69,34 @@ def delete_object(key: str) -> None:
         _client().delete_object(Bucket=settings.s3_bucket_name, Key=key)
     except (BotoCoreError, ClientError) as error:
         raise StorageUnavailable from error
+
+
+def list_object_keys() -> list[str]:
+    try:
+        paginator = _client().get_paginator("list_objects_v2")
+        return [
+            item["Key"]
+            for page in paginator.paginate(Bucket=settings.s3_bucket_name)
+            for item in page.get("Contents", [])
+        ]
+    except (BotoCoreError, ClientError) as error:
+        raise StorageUnavailable from error
+
+
+def delete_objects(keys: list[str]) -> int:
+    deleted = 0
+    try:
+        client = _client()
+        for start in range(0, len(keys), 1_000):
+            response = client.delete_objects(
+                Bucket=settings.s3_bucket_name,
+                Delete={
+                    "Objects": [{"Key": key} for key in keys[start : start + 1_000]]
+                },
+            )
+            deleted += len(response.get("Deleted", []))
+            if response.get("Errors"):
+                raise StorageUnavailable(deleted)
+    except (BotoCoreError, ClientError) as error:
+        raise StorageUnavailable(deleted) from error
+    return deleted

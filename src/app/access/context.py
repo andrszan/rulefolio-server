@@ -44,3 +44,9 @@ def set_file_lifecycle_scope(session: Session, file_id: UUID) -> None:
 
 def set_file_recovery_work_scope(session: Session, work_id: UUID) -> None:
     _set_scope(session, "app.file_recovery_work_id", work_id)
+
+
+def set_project_baseline_scope(session: Session) -> None:
+    session.execute(
+        text("SELECT set_config('app.project_baseline_maintenance', 'active', true)")
+    )

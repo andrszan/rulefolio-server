@@ -5,7 +5,7 @@ from threading import Barrier
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import select, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.orm import Session
 
 from app.access.context import set_actor, set_workspace_management_scope
@@ -144,9 +144,17 @@ def test_private_image_uses_real_bucket_and_rechecks_work_access() -> None:
                 "FROM pg_class WHERE relname = 'files'"
             )
         ).scalar_one()
-        assert not session.execute(
+        assert session.execute(
             text("SELECT has_table_privilege(current_user, 'files', 'DELETE')")
         ).scalar_one()
+        set_actor(session, collaborator.id)
+        assert (
+            session.execute(
+                delete(StoredFile).where(StoredFile.id == image.id)
+            ).rowcount
+            == 0
+        )
+        session.rollback()
         assert not session.execute(
             text(
                 "SELECT has_table_privilege(current_user, 'alembic_version', 'SELECT')"

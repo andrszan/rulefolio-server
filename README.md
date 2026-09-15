@@ -2,7 +2,7 @@
 
 本仓库是好玩实验室（`rulefolio`）的 API 服务，使用 FastAPI、同步 SQLAlchemy 2.x、Psycopg 3、PostgreSQL、Alembic、Pydantic v2、pytest 和 Ruff。
 
-当前已提供应用配置、数据库连接、请求日志、错误响应、CORS、`/health`、`/ready`，以及账户开通、Argon2id 密码、opaque session、恢复凭据、Outbox 和 SMTP 派发能力；还包括私有工作空间、成员、邮件邀请及邀请兑换，以及默认私有的作品、基础资料更新、作品级访问控制和作品图片的私有上传、列表、预览与下载。版本、场次、反馈和问题能力尚未实现。
+当前已提供应用配置、数据库连接、请求日志、错误响应、CORS、`/health`、`/ready`，以及账户开通、Argon2id 密码、opaque session、恢复凭据、Outbox 和 SMTP 派发能力；还包括私有工作空间、成员、邮件邀请及邀请兑换，以及默认私有的作品、基础资料更新、作品级访问控制和作品图片的私有上传、列表、预览与下载。项目维护者可从空的项目数据库与私有桶创建交付基线，或经明确确认重置该项目范围。版本、场次、反馈和问题能力尚未实现。
 
 ## 环境要求
 
@@ -52,6 +52,7 @@ API 文档默认位于：
 - `APP_*`、`API_PREFIX`、`ENABLE_API_DOCS`、`LOG_LEVEL`、`CORS_ORIGINS`：应用、文档、日志和前端联调设置。
 - `PASSWORD_*`、`ARGON2_*`、`SESSION_TTL_HOURS`、`ONE_TIME_TOKEN_TTL_MINUTES`、`*_MAX_ATTEMPTS`、`AUTH_ATTEMPT_*`、`RECOVERY_RESPONSE_MIN_DURATION_MS`、`RECOVERY_JOB_STALE_MINUTES`：服务端认证安全参数。
 - `TOKEN_ENCRYPTION_KEY`、`AUTH_ATTEMPT_PEPPER`：恢复 token 信封和尝试主体摘要的受保护密钥，不能进入客户端或版本库。
+- `BASELINE_PASSWORD`：交付基线账号的受保护密码，不能通过命令参数、日志或客户端传入；账号交接信息见[项目准备清单](../docs/requirements/项目准备清单.md)。
 - `S3_*`：私有版本材料和作品图片的对象存储绑定。
 - `SMTP_*` 与 `MAIL_*`：开发邮件发送和测试收件人绑定。
 
@@ -78,6 +79,20 @@ uv run --locked python -m app.manage_workspaces \
   --operator <operator-id> \
   --reason <approved-reason>
 ```
+
+初始化只接受操作者和理由，在当前项目数据库和私有桶均为空时创建交付账号、工作空间、作品、角色和图片；已有数据时不修改。重置会删除当前配置绑定的全部项目记录与对象，执行前先停止本项目 API 与邮件派发进程，并使用当前 `DB_NAME:S3_BUCKET_NAME` 明确确认：
+
+```bash
+uv run --locked python -m app.manage_project initialize \
+  --operator <operator> \
+  --reason <reason>
+uv run --locked python -m app.manage_project reset \
+  --operator <operator> \
+  --reason <reason> \
+  --confirm-reset "<DB_NAME>:<S3_BUCKET_NAME>"
+```
+
+初始化或重置失败时不会报告成功；若出现部分写入，仅用带确认的 `reset` 收敛到完整基线。账号、数据范围和交付验收方式见[项目准备清单](../docs/requirements/项目准备清单.md)。
 
 由独立进程先处理已加密的恢复请求队列、再派发已提交的 Outbox；工作空间邀请在派发前会再次复核邀请和凭据，SMTP 已接受只表示邮件服务接受请求，不表示已送达或已阅读：
 
@@ -107,6 +122,8 @@ src/app/
 ├── works/                 # 私有作品、基础资料与作品级访问服务
 ├── manage_identity.py     # 受控账户开通与 Outbox 诊断命令
 ├── manage_workspaces.py   # 受控工作空间诊断命令
+├── manage_project.py      # 项目初始化与重置命令
+├── project_baseline.py    # 交付基线编排与受控清理
 ├── mail_dispatcher.py     # 邮件派发进程入口
 ├── health.py              # 根级存活与就绪探针
 └── main.py                # 应用装配
