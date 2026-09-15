@@ -26,6 +26,7 @@ class StoredFile(Base):
             "status IN ('pending', 'ready', 'failed')", name="ck_file_status"
         ),
         CheckConstraint("size_bytes >= 0", name="ck_file_size_nonnegative"),
+        CheckConstraint("kind IN ('image', 'material')", name="ck_file_kind"),
         ForeignKeyConstraint(
             ["work_id", "workspace_id"],
             ["works.id", "works.workspace_id"],
@@ -54,6 +55,7 @@ class StoredFile(Base):
     sha256: Mapped[bytes] = mapped_column(LargeBinary(32), nullable=False)
     object_key: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="image")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

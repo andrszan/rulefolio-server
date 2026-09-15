@@ -164,3 +164,80 @@ def test_work_revision_conflict_uses_stable_reason(
 
     assert response.status_code == 409
     assert response.json()["data"] == {"reason": "work_revision_conflict"}
+
+
+def test_current_rule_materials_use_stable_contract_and_revision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    workspace_id = uuid4()
+    work_id = uuid4()
+    material_id = uuid4()
+    _authorize(monkeypatch, account)
+    current = service.RuleMaterialsData(
+        rule_name="当前规则",
+        rule_description="供下次试玩使用",
+        rule_content="按顺序探索、协助或记录。",
+        materials=(
+            service.material_files.MaterialData(
+                id=material_id,
+                display_name="规则书.pdf",
+                detected_content_type="application/pdf",
+                size_bytes=1024,
+                created_at=datetime(2026, 9, 15, tzinfo=UTC),
+            ),
+        ),
+        revision=2,
+    )
+    monkeypatch.setattr(service, "read_rule_materials", lambda *_: current)
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/v1/workspaces/{workspace_id}/works/{work_id}/rule-materials",
+            headers={"Authorization": "Bearer session-token"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["data"] == {
+        "ruleName": "当前规则",
+        "ruleDescription": "供下次试玩使用",
+        "ruleContent": "按顺序探索、协助或记录。",
+        "materials": [
+            {
+                "id": str(material_id),
+                "displayName": "规则书.pdf",
+                "detectedContentType": "application/pdf",
+                "sizeBytes": 1024,
+                "createdAt": "2026-09-15T00:00:00+00:00",
+            }
+        ],
+        "revision": 2,
+    }
+
+
+def test_save_current_rule_reports_conflicts_without_changing_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    _authorize(monkeypatch, account)
+    monkeypatch.setattr(
+        service,
+        "update_rule_materials",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(service.WorkRevisionConflict),
+    )
+
+    with TestClient(app) as client:
+        response = client.put(
+            f"/api/v1/workspaces/{uuid4()}/works/{uuid4()}/rule-materials",
+            headers={"Authorization": "Bearer session-token"},
+            json={
+                "ruleName": "当前规则",
+                "ruleDescription": "供下次试玩使用",
+                "ruleContent": "按顺序探索、协助或记录。",
+                "materialFileIds": [],
+                "expectedRevision": 1,
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["data"] == {"reason": "work_revision_conflict"}

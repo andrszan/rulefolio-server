@@ -115,3 +115,59 @@ def test_list_exposes_server_limits_and_preview_hides_unavailable_image(
     }
     assert preview.status_code == 404
     assert preview.json()["data"] == {"reason": "image_unavailable"}
+
+
+def test_material_candidates_expose_limits_and_hide_direct_file_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    workspace_id = uuid4()
+    work_id = uuid4()
+    _authorize(monkeypatch, account)
+    material = service.materials.MaterialData(
+        id=uuid4(),
+        display_name="规则书.pdf",
+        detected_content_type="application/pdf",
+        size_bytes=1024,
+        created_at=datetime(2026, 9, 15, tzinfo=UTC),
+    )
+    monkeypatch.setattr(service, "list_materials", lambda *_: [material])
+    monkeypatch.setattr(
+        service,
+        "open_material",
+        lambda *_: (_ for _ in ()).throw(service.MaterialUnavailable),
+    )
+
+    with TestClient(app) as client:
+        listed = client.get(
+            f"/api/v1/workspaces/{workspace_id}/works/{work_id}/material-files",
+            headers={"Authorization": "Bearer session-token"},
+        )
+        preview = client.get(
+            f"/api/v1/workspaces/{workspace_id}/works/{work_id}/material-files/{uuid4()}/preview",
+            headers={"Authorization": "Bearer session-token"},
+        )
+
+    assert listed.status_code == 200
+    assert listed.json()["data"]["items"] == [
+        {
+            "id": str(material.id),
+            "displayName": "规则书.pdf",
+            "detectedContentType": "application/pdf",
+            "sizeBytes": 1024,
+            "createdAt": "2026-09-15T00:00:00+00:00",
+        }
+    ]
+    assert listed.json()["data"]["limits"] == {
+        "allowedContentTypes": [
+            "application/pdf",
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+        ],
+        "maxBytes": 8 * 1024 * 1024,
+        "maxCount": 8,
+        "maxTotalBytes": 32 * 1024 * 1024,
+    }
+    assert preview.status_code == 404
+    assert preview.json()["data"] == {"reason": "material_unavailable"}

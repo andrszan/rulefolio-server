@@ -28,7 +28,7 @@ from app.identity.models import (
 )
 from app.notifications.models import MailOutbox
 from app.works import service as works_service
-from app.works.models import Work
+from app.works.models import Work, WorkMaterialFile
 from app.workspaces import service as workspaces_service
 from app.workspaces.models import (
     WorkAccess,
@@ -76,6 +76,8 @@ BASELINE_ACCOUNTS = (
 )
 BASELINE_SCOPE = "project_baseline"
 BASELINE_IMAGE = Path(__file__).with_name("baseline-work.jpg")
+BASELINE_RULES = Path(__file__).with_name("baseline-rules.pdf")
+BASELINE_PLAYER_AID = Path(__file__).with_name("baseline-player-aid.pdf")
 PROJECT_BASELINE_LOCK_KEY = 4_580_051
 
 
@@ -134,6 +136,7 @@ def _record_count(session: Session) -> int:
         WorkspaceInvitationAttempt,
         Work,
         WorkAccess,
+        WorkMaterialFile,
         StoredFile,
     )
     return sum(
@@ -153,7 +156,14 @@ def _preflight(session: Session) -> tuple[list[str], int]:
 
 
 def _baseline_counts() -> dict[str, int]:
-    return {"accounts": 3, "workspaces": 1, "works": 1, "accesses": 3, "images": 1}
+    return {
+        "accounts": 3,
+        "workspaces": 1,
+        "works": 1,
+        "accesses": 3,
+        "images": 1,
+        "materials": 2,
+    }
 
 
 def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
@@ -167,7 +177,9 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
         )
 
     password = settings.baseline_password.get_secret_value()
-    if not password or not BASELINE_IMAGE.is_file():
+    if not password or not all(
+        path.is_file() for path in (BASELINE_IMAGE, BASELINE_RULES, BASELINE_PLAYER_AID)
+    ):
         raise BaselineOperationFailed("configuration", {})
 
     counts: dict[str, int] = {}
@@ -251,6 +263,39 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
                 "image/jpeg",
             )
 
+        phase = "rule_materials"
+        materials = []
+        for source_path, display_name in (
+            (BASELINE_RULES, "雾林棋局当前规则书.pdf"),
+            (BASELINE_PLAYER_AID, "雾林棋局打印辅助页.pdf"),
+        ):
+            with source_path.open("rb") as source:
+                materials.append(
+                    files_service.upload_material(
+                        session,
+                        owner.id,
+                        workspace.id,
+                        work.id,
+                        source,
+                        display_name,
+                        "application/pdf",
+                    )
+                )
+        works_service.update_rule_materials(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            rule_name="雾林棋局当前规则",
+            rule_description="供下一次试玩使用的基础规则与打印辅助页。",
+            rule_content=(
+                "两至四名玩家共同穿过雾林，在路径封闭前找到三枚线索并回到营地。"
+                "每回合选择探索、协助或记录。"
+            ),
+            material_file_ids=[material.id for material in materials],
+            expected_revision=work.revision,
+        )
+
         phase = "audit"
         session.add(
             SecurityAudit(
@@ -275,6 +320,7 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
 def _clear_database(session: Session) -> int:
     set_project_baseline_scope(session)
     models = (
+        WorkMaterialFile,
         StoredFile,
         WorkAccess,
         Work,

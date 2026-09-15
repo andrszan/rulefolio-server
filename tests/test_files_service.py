@@ -6,9 +6,10 @@ from uuid import uuid4
 
 import pytest
 from PIL import Image
+from pypdf import PdfWriter
 
 from app.files import service
-from app.files.policy import MAX_IMAGE_BYTES
+from app.files.policy import MAX_IMAGE_BYTES, MAX_MATERIAL_BYTES
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -52,6 +53,31 @@ def test_invalid_or_too_large_bytes_never_become_an_image() -> None:
     with pytest.raises(service.ImageLimitExceeded):
         service._read_image(
             BytesIO(b"x" * (MAX_IMAGE_BYTES + 1)), "image.jpg", "image/jpeg"
+        )
+
+
+def test_material_reader_validates_real_pdf_and_rejects_invalid_bytes() -> None:
+    source = BytesIO()
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    writer.write(source)
+    source.seek(0)
+
+    material = service._read_material(source, "../规则书.pdf", "text/plain")
+    try:
+        assert material.display_name == "规则书.pdf"
+        assert material.detected_content_type == "application/pdf"
+        assert len(material.digest) == 32
+    finally:
+        material.close()
+
+    with pytest.raises(service.MaterialTypeNotAllowed):
+        service._read_material(BytesIO(b"%PDF-broken"), "规则书.pdf", "application/pdf")
+    with pytest.raises(service.MaterialLimitExceeded):
+        service._read_material(
+            BytesIO(b"x" * (MAX_MATERIAL_BYTES + 1)),
+            "规则书.pdf",
+            "application/pdf",
         )
 
 

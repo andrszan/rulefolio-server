@@ -28,6 +28,11 @@ class Work(Base):
             name="ck_work_estimated_duration_positive",
         ),
         CheckConstraint("revision > 0", name="ck_work_revision_positive"),
+        CheckConstraint(
+            "(rule_name IS NULL AND rule_description IS NULL AND rule_content IS NULL) "
+            "OR (btrim(rule_name) <> '' AND btrim(rule_content) <> '')",
+            name="ck_work_current_rule_complete",
+        ),
         UniqueConstraint("id", "workspace_id", name="uq_work_id_workspace"),
         Index("ix_works_workspace_created", "workspace_id", "created_at", "id"),
     )
@@ -48,9 +53,27 @@ class Work(Base):
     max_players: Mapped[int] = mapped_column(Integer, nullable=False)
     estimated_duration_minutes: Mapped[int] = mapped_column(Integer, nullable=False)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    rule_name: Mapped[str | None] = mapped_column(String(160))
+    rule_description: Mapped[str | None] = mapped_column(Text)
+    rule_content: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class WorkMaterialFile(Base):
+    __tablename__ = "work_material_files"
+
+    work_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("works.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    file_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("files.id", ondelete="RESTRICT"),
+        primary_key=True,
     )

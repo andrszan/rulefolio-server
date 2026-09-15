@@ -228,3 +228,173 @@ def test_concurrent_pending_recovery_preserves_ready_object(
             assert stream.body.read() == (FIXTURES / "board-game-box.jpg").read_bytes()
         finally:
             stream.body.close()
+
+
+def test_current_materials_only_expose_saved_selection_and_keep_replaced_bytes() -> (
+    None
+):
+    suffix = uuid4().hex
+    owner = Account(email=f"material-owner-{suffix}@example.com", status="active")
+    organizer = Account(
+        email=f"material-organizer-{suffix}@example.com", status="active"
+    )
+    collaborator = Account(
+        email=f"material-collaborator-{suffix}@example.com", status="active"
+    )
+
+    with SessionLocal() as session:
+        session.add_all((owner, organizer, collaborator))
+        session.commit()
+        set_actor(session, owner.id)
+        workspace = workspaces_service.create_workspace(
+            session, owner.id, f"材料权限-{suffix[:8]}", None
+        )
+        set_workspace_management_scope(session, workspace.id)
+        session.add_all(
+            (
+                WorkspaceMember(workspace_id=workspace.id, account_id=organizer.id),
+                WorkspaceMember(workspace_id=workspace.id, account_id=collaborator.id),
+            )
+        )
+        session.commit()
+        set_actor(session, owner.id)
+        work = _create_work(session, owner.id, workspace.id)
+        set_actor(session, owner.id)
+        works_service.set_work_access(
+            session, owner.id, workspace.id, work.id, organizer.id, "organizer"
+        )
+        set_actor(session, owner.id)
+        works_service.set_work_access(
+            session, owner.id, workspace.id, work.id, collaborator.id, "collaborator"
+        )
+
+        rulebook = Path(__file__).parents[1] / "src/app/baseline-rules.pdf"
+        player_aid = Path(__file__).parents[1] / "src/app/baseline-player-aid.pdf"
+        set_actor(session, owner.id)
+        with rulebook.open("rb") as source:
+            first_material = files_service.upload_material(
+                session,
+                owner.id,
+                workspace.id,
+                work.id,
+                source,
+                "当前规则书.pdf",
+                "application/pdf",
+            )
+        set_actor(session, owner.id)
+        first_object_key = session.scalar(
+            select(StoredFile.object_key).where(StoredFile.id == first_material.id)
+        )
+        assert first_object_key is not None
+        first_rule = works_service.update_rule_materials(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            rule_name="当前规则",
+            rule_description=None,
+            rule_content="先探索，再协助或记录。",
+            material_file_ids=[first_material.id],
+            expected_revision=work.revision,
+        )
+        assert first_rule.revision == 2
+
+        for account in (organizer, collaborator):
+            set_actor(session, account.id)
+            current = works_service.read_rule_materials(
+                session, account.id, workspace.id, work.id
+            )
+            assert current.rule_content == "先探索，再协助或记录。"
+            assert [material.id for material in current.materials] == [
+                first_material.id
+            ]
+            stream = files_service.open_material(
+                session, account.id, workspace.id, work.id, first_material.id
+            )
+            try:
+                assert stream.body.read() == rulebook.read_bytes()
+            finally:
+                stream.body.close()
+
+        set_actor(session, organizer.id)
+        with pytest.raises(works_service.WorkManagementForbidden):
+            files_service.list_materials(session, organizer.id, workspace.id, work.id)
+
+        set_actor(session, owner.id)
+        with player_aid.open("rb") as source:
+            second_material = files_service.upload_material(
+                session,
+                owner.id,
+                workspace.id,
+                work.id,
+                source,
+                "打印辅助页.pdf",
+                "application/pdf",
+            )
+        second_rule = works_service.update_rule_materials(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            rule_name="当前规则",
+            rule_description="下一次试玩使用辅助页。",
+            rule_content="先探索，再协助或记录。",
+            material_file_ids=[second_material.id, first_material.id],
+            expected_revision=first_rule.revision,
+        )
+        assert second_rule.revision == 3
+
+        set_actor(session, collaborator.id)
+        current = works_service.read_rule_materials(
+            session, collaborator.id, workspace.id, work.id
+        )
+        assert [material.id for material in current.materials] == [
+            material.id
+            for material in sorted(
+                (first_material, second_material),
+                key=lambda material: (material.created_at, material.id),
+            )
+        ]
+
+        third_rule = works_service.update_rule_materials(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            rule_name="当前规则",
+            rule_description="下一次试玩使用辅助页。",
+            rule_content="先探索，再协助或记录。",
+            material_file_ids=[second_material.id],
+            expected_revision=second_rule.revision,
+        )
+        assert third_rule.revision == 4
+        first_body = storage.open_object(first_object_key)
+        assert first_body is not None
+        first_body.close()
+
+        set_actor(session, collaborator.id)
+        assert list(session.scalars(select(StoredFile))) == []
+        with pytest.raises(files_service.MaterialUnavailable):
+            files_service.open_material(
+                session, collaborator.id, workspace.id, work.id, first_material.id
+            )
+        stream = files_service.open_material(
+            session, collaborator.id, workspace.id, work.id, second_material.id
+        )
+        try:
+            assert stream.body.read() == player_aid.read_bytes()
+        finally:
+            stream.body.close()
+        set_actor(session, owner.id)
+        with pytest.raises(works_service.WorkRevisionConflict):
+            works_service.update_rule_materials(
+                session,
+                owner.id,
+                workspace.id,
+                work.id,
+                rule_name="过期规则",
+                rule_description=None,
+                rule_content="不应覆盖。",
+                material_file_ids=[second_material.id],
+                expected_revision=second_rule.revision,
+            )

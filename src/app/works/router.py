@@ -58,6 +58,35 @@ class WorkUpdateRequest(WorkValuesRequest):
     expected_revision: int = Field(gt=0, validation_alias="expectedRevision")
 
 
+class RuleMaterialsUpdateRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    rule_name: str = Field(min_length=1, max_length=160, validation_alias="ruleName")
+    rule_description: str | None = Field(
+        default=None, max_length=2000, validation_alias="ruleDescription"
+    )
+    rule_content: str = Field(
+        min_length=1, max_length=50_000, validation_alias="ruleContent"
+    )
+    material_file_ids: list[UUID] = Field(
+        default_factory=list, validation_alias="materialFileIds"
+    )
+    expected_revision: int = Field(gt=0, validation_alias="expectedRevision")
+
+    @field_validator("rule_name", "rule_content")
+    @classmethod
+    def strip_required_rule_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("字段不能为空")
+        return value
+
+    @field_validator("rule_description")
+    @classmethod
+    def strip_optional_rule_text(cls, value: str | None) -> str | None:
+        return value.strip() or None if value is not None else None
+
+
 class WorkAccessSetRequest(BaseModel):
     role: Literal["maintainer", "organizer", "collaborator"]
 
@@ -79,6 +108,26 @@ class WorkResponseData(BaseModel):
     revision: int
     own_role: str = Field(serialization_alias="ownRole")
     can_manage_access: bool = Field(serialization_alias="canManageAccess")
+
+
+class MaterialResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: UUID
+    display_name: str = Field(serialization_alias="displayName")
+    detected_content_type: str = Field(serialization_alias="detectedContentType")
+    size_bytes: int = Field(serialization_alias="sizeBytes")
+    created_at: str = Field(serialization_alias="createdAt")
+
+
+class RuleMaterialsResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    rule_name: str | None = Field(serialization_alias="ruleName")
+    rule_description: str | None = Field(serialization_alias="ruleDescription")
+    rule_content: str | None = Field(serialization_alias="ruleContent")
+    materials: list[MaterialResponseData]
+    revision: int
 
 
 class WorkAccessResponseData(BaseModel):
@@ -125,6 +174,27 @@ def _work_response(data: service.WorkData) -> WorkResponseData:
     )
 
 
+def _rule_materials_response(
+    data: service.RuleMaterialsData,
+) -> RuleMaterialsResponseData:
+    return RuleMaterialsResponseData(
+        rule_name=data.rule_name,
+        rule_description=data.rule_description,
+        rule_content=data.rule_content,
+        materials=[
+            MaterialResponseData(
+                id=material.id,
+                display_name=material.display_name,
+                detected_content_type=material.detected_content_type,
+                size_bytes=material.size_bytes,
+                created_at=material.created_at.isoformat(),
+            )
+            for material in data.materials
+        ],
+        revision=data.revision,
+    )
+
+
 def _work_error(error: Exception) -> None:
     if isinstance(error, service.WorkspaceUnavailable):
         raise api_error(404, "工作空间不可用", "workspace_unavailable") from error
@@ -138,6 +208,8 @@ def _work_error(error: Exception) -> None:
         raise api_error(
             409, "作品已被更新，请重新加载后核对", "work_revision_conflict"
         ) from error
+    if isinstance(error, service.MaterialSelectionInvalid):
+        raise api_error(422, "所选材料不可用", "material_selection_invalid") from error
     if isinstance(error, service.WorkLastMaintainerRequired):
         raise api_error(
             409, "作品至少需要一名维护者", "work_last_maintainer_required"
@@ -271,6 +343,65 @@ def update_work(
         _work_error(error)
         raise
     return ApiResponse(code=200, message="作品资料已更新", data=_work_response(work))
+
+
+@router.get(
+    "/workspaces/{workspace_id}/works/{work_id}/rule-materials",
+    response_model=ApiResponse[RuleMaterialsResponseData],
+    summary="读取当前规则与材料",
+)
+def read_rule_materials(
+    workspace_id: UUID,
+    work_id: UUID,
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[RuleMaterialsResponseData]:
+    try:
+        data = service.read_rule_materials(session, account.id, workspace_id, work_id)
+    except Exception as error:
+        _work_error(error)
+        raise
+    return ApiResponse(
+        code=200,
+        message="当前规则与材料已加载",
+        data=_rule_materials_response(data),
+    )
+
+
+@router.put(
+    "/workspaces/{workspace_id}/works/{work_id}/rule-materials",
+    response_model=ApiResponse[RuleMaterialsResponseData],
+    summary="保存当前规则与材料",
+)
+def update_rule_materials(
+    workspace_id: UUID,
+    work_id: UUID,
+    request: RuleMaterialsUpdateRequest,
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[RuleMaterialsResponseData]:
+    try:
+        data = service.update_rule_materials(
+            session,
+            account.id,
+            workspace_id,
+            work_id,
+            rule_name=request.rule_name,
+            rule_description=request.rule_description,
+            rule_content=request.rule_content,
+            material_file_ids=request.material_file_ids,
+            expected_revision=request.expected_revision,
+        )
+    except ValueError as error:
+        raise api_error(422, "请求参数有误", "validation_failed") from error
+    except Exception as error:
+        _work_error(error)
+        raise
+    return ApiResponse(
+        code=200,
+        message="当前规则与材料已保存",
+        data=_rule_materials_response(data),
+    )
 
 
 @router.get(

@@ -16,12 +16,14 @@ from app.notifications.models import MailOutbox
 from app.project_baseline import (
     BASELINE_ACCOUNTS,
     BASELINE_IMAGE,
+    BASELINE_PLAYER_AID,
+    BASELINE_RULES,
     BaselineOperationFailed,
     initialize,
     reset,
     reset_confirmation,
 )
-from app.works.models import Work
+from app.works.models import Work, WorkMaterialFile
 from app.workspaces.models import WorkAccess, Workspace
 
 pytestmark = pytest.mark.skipif(
@@ -33,11 +35,11 @@ pytestmark = pytest.mark.skipif(
 
 def _reset() -> None:
     with SessionLocal() as session:
-        result = reset(session, "pytest", "BR-005 集成验证", reset_confirmation())
+        result = reset(session, "pytest", "BR-006 集成验证", reset_confirmation())
     assert result.status == "reset"
 
 
-def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID]:
+def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID, tuple[UUID, ...]]:
     with SessionLocal() as session:
         set_project_baseline_scope(session)
         accounts = list(session.scalars(select(Account).order_by(Account.email)))
@@ -45,11 +47,22 @@ def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID]:
         works = list(session.scalars(select(Work)))
         accesses = list(session.scalars(select(WorkAccess)))
         files = list(session.scalars(select(StoredFile)))
+        material_relations = list(session.scalars(select(WorkMaterialFile)))
         assert [account.email for account in accounts] == sorted(
             account.email for account in BASELINE_ACCOUNTS
         )
-        assert len(workspaces) == len(works) == len(files) == 1
+        assert len(workspaces) == len(works) == 1
         assert len(accesses) == 3
+        images = [file for file in files if file.kind == "image"]
+        materials = sorted(
+            (file for file in files if file.kind == "material"),
+            key=lambda file: file.display_name,
+        )
+        assert len(images) == 1
+        assert len(materials) == len(material_relations) == 2
+        assert {relation.file_id for relation in material_relations} == {
+            material.id for material in materials
+        }
         assert session.scalar(select(func.count()).select_from(OneTimeCredential)) == 0
         assert session.scalar(select(func.count()).select_from(MailOutbox)) == 0
         assert session.scalar(select(func.count()).select_from(SessionRecord)) == 0
@@ -58,17 +71,24 @@ def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID]:
             for account in accounts
             if account.email == BASELINE_ACCOUNTS[0].email
         )
-        workspace, work, image = workspaces[0], works[0], files[0]
-        result = owner.email, owner.id, workspace.id, work.id, image.id
-        object_key = image.object_key
+        workspace, work, image = workspaces[0], works[0], images[0]
+        result = (
+            owner.email,
+            owner.id,
+            workspace.id,
+            work.id,
+            image.id,
+            tuple(material.id for material in materials),
+        )
+        object_keys = sorted(file.object_key for file in files)
         session.rollback()
-    assert storage.list_object_keys() == [object_key]
+    assert storage.list_object_keys() == object_keys
     return result
 
 
 def test_reset_initializes_rejects_reentry_and_restores_real_image() -> None:
     _reset()
-    owner_email, owner_id, workspace_id, work_id, image_id = _baseline_state()
+    owner_email, owner_id, workspace_id, work_id, image_id, _ = _baseline_state()
 
     with SessionLocal() as session:
         rejected = initialize(session, "pytest", "重复初始化验证")
@@ -97,7 +117,9 @@ def test_reset_initializes_rejects_reentry_and_restores_real_image() -> None:
     with SessionLocal() as session:
         with pytest.raises(identity_service.SessionUnavailable):
             identity_service.authenticate(session, first_session.token)
-    owner_email, owner_id, workspace_id, work_id, image_id = _baseline_state()
+    owner_email, owner_id, workspace_id, work_id, image_id, material_ids = (
+        _baseline_state()
+    )
 
     with SessionLocal() as session:
         for account in BASELINE_ACCOUNTS:
@@ -114,6 +136,16 @@ def test_reset_initializes_rejects_reentry_and_restores_real_image() -> None:
             assert stream.body.read() == BASELINE_IMAGE.read_bytes()
         finally:
             stream.body.close()
+        for material_id, source_path in zip(
+            material_ids, (BASELINE_RULES, BASELINE_PLAYER_AID), strict=True
+        ):
+            stream = files_service.open_material(
+                session, owner_id, workspace_id, work_id, material_id
+            )
+            try:
+                assert stream.body.read() == source_path.read_bytes()
+            finally:
+                stream.body.close()
 
     _reset()
     _baseline_state()
@@ -155,7 +187,7 @@ def test_reset_reports_only_completed_object_cleanup(
     with SessionLocal() as session, pytest.raises(BaselineOperationFailed) as error:
         reset(session, "pytest", "数据库失败验证", reset_confirmation())
     assert error.value.phase == "database_cleanup"
-    assert error.value.counts == {"records": 0, "objects": 1}
+    assert error.value.counts == {"records": 0, "objects": 3}
     _baseline_state()
 
 

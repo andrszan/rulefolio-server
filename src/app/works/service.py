@@ -1,13 +1,14 @@
 from dataclasses import dataclass
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.access.context import set_work_management_scope
+from app.access.context import set_actor, set_work_management_scope
 from app.audit.models import SecurityAudit
-from app.works.models import Work
+from app.files import materials as material_files
+from app.works.models import Work, WorkMaterialFile
 from app.workspaces import service as workspaces_service
 
 WORK_ROLES = frozenset({"maintainer", "organizer", "collaborator"})
@@ -27,6 +28,10 @@ class WorkManagementForbidden(Exception):
 
 
 class WorkRevisionConflict(Exception):
+    pass
+
+
+class MaterialSelectionInvalid(Exception):
     pass
 
 
@@ -66,6 +71,15 @@ class WorkData:
 class WorkAccessData:
     account_id: UUID
     role: str
+
+
+@dataclass(frozen=True)
+class RuleMaterialsData:
+    rule_name: str | None
+    rule_description: str | None
+    rule_content: str | None
+    materials: tuple[material_files.MaterialData, ...]
+    revision: int
 
 
 @dataclass(frozen=True)
@@ -297,6 +311,18 @@ def ensure_work_access(
         raise WorkOperationRetryable from error
 
 
+def ensure_work_management(
+    session: Session, actor_id: UUID, workspace_id: UUID, work_id: UUID
+) -> None:
+    try:
+        _require_manager(session, workspace_id, work_id, actor_id)
+    except (WorkManagementForbidden, WorkUnavailable):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise WorkOperationRetryable from error
+
+
 def lock_work_for_files(
     session: Session, actor_id: UUID, workspace_id: UUID, work_id: UUID
 ) -> None:
@@ -397,6 +423,101 @@ def update_work(
         session.rollback()
         raise
     return _work_data(updated, MAINTAINER)
+
+
+def read_rule_materials(
+    session: Session, actor_id: UUID, workspace_id: UUID, work_id: UUID
+) -> RuleMaterialsData:
+    try:
+        work = _load_visible_work(session, workspace_id, work_id)
+        if _own_access_role(session, work.id, actor_id) is None:
+            session.rollback()
+            raise WorkUnavailable
+        materials = material_files.current_ready_materials(session, work.id)
+    except WorkUnavailable:
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise WorkOperationRetryable from error
+    return RuleMaterialsData(
+        rule_name=work.rule_name,
+        rule_description=work.rule_description,
+        rule_content=work.rule_content,
+        materials=tuple(materials),
+        revision=work.revision,
+    )
+
+
+def update_rule_materials(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    *,
+    rule_name: str,
+    rule_description: str | None,
+    rule_content: str,
+    material_file_ids: list[UUID],
+    expected_revision: int,
+) -> RuleMaterialsData:
+    rule_name = rule_name.strip()
+    rule_description = rule_description.strip() if rule_description else None
+    rule_content = rule_content.strip()
+    if not rule_name or not rule_content:
+        raise ValueError("规则名称和正文不能为空")
+    selected_ids = set(material_file_ids)
+    try:
+        set_actor(session, actor_id)
+        work, _ = _prepare_manager_write(session, workspace_id, work_id, actor_id)
+        selected = material_files.selected_ready_materials(
+            session, workspace_id, work.id, selected_ids
+        )
+        if len(selected) != len(selected_ids):
+            session.rollback()
+            raise MaterialSelectionInvalid
+        updated = session.execute(
+            update(Work)
+            .where(Work.id == work.id, Work.revision == expected_revision)
+            .values(
+                rule_name=rule_name,
+                rule_description=rule_description,
+                rule_content=rule_content,
+                revision=Work.revision + 1,
+                updated_at=func.now(),
+            )
+            .returning(Work)
+        ).scalar_one_or_none()
+        if updated is None:
+            session.rollback()
+            raise WorkRevisionConflict
+        session.execute(
+            delete(WorkMaterialFile).where(WorkMaterialFile.work_id == work.id)
+        )
+        session.add_all(
+            WorkMaterialFile(work_id=work.id, file_id=file.id) for file in selected
+        )
+        session.flush()
+        _commit_or_rollback(session)
+    except (
+        MaterialSelectionInvalid,
+        WorkManagementForbidden,
+        WorkRevisionConflict,
+        WorkUnavailable,
+    ):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise WorkOperationRetryable from error
+    except Exception:
+        session.rollback()
+        raise
+    return RuleMaterialsData(
+        rule_name=updated.rule_name,
+        rule_description=updated.rule_description,
+        rule_content=updated.rule_content,
+        materials=tuple(material_files.material_data(file) for file in selected),
+        revision=updated.revision,
+    )
 
 
 def list_access_members(
