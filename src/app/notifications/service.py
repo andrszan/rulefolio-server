@@ -2,7 +2,7 @@ import os
 from uuid import UUID
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-from sqlalchemy import update
+from sqlalchemy import and_, or_, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -38,6 +38,47 @@ def enqueue_token_mail(
     )
     session.add(outbox)
     return outbox
+
+
+def enqueue_business_mail(
+    session: Session,
+    account_id: UUID,
+    purpose: str,
+    subject: str,
+    body: str,
+    *,
+    business_scope: str,
+) -> MailOutbox:
+    """写入已冻结正文的业务邮件，不附带一次性凭据。"""
+    outbox = MailOutbox(
+        recipient_account_id=account_id,
+        purpose=purpose,
+        business_scope=business_scope,
+        frozen_subject=subject,
+        frozen_body=body,
+    )
+    session.add(outbox)
+    session.flush()
+    return outbox
+
+
+def suppress_business_mails(session: Session, business_scope: str) -> None:
+    """取消场次时只抑制尚未被 SMTP 领取的本场业务邮件。"""
+    session.execute(
+        update(MailOutbox)
+        .where(
+            MailOutbox.business_scope == business_scope,
+            MailOutbox.credential_id.is_(None),
+            or_(
+                MailOutbox.status == "pending",
+                and_(
+                    MailOutbox.status == "sending",
+                    MailOutbox.smtp_started_at.is_(None),
+                ),
+            ),
+        )
+        .values(status="suppressed", claim_id=None)
+    )
 
 
 def clear_outbox_envelopes(

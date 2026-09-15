@@ -246,6 +246,16 @@ def get_or_create_invitation_account(session: Session, email: str) -> Account:
     return account
 
 
+def find_active_account_by_email(session: Session, email: str) -> Account | None:
+    """仅解析已激活账户；不创建待激活邀请账户。"""
+    normalized_email = normalize_email(email)
+    return session.scalar(
+        select(Account)
+        .where(Account.email == normalized_email, Account.status == ACTIVE)
+        .with_for_update()
+    )
+
+
 def create_active_baseline_account(
     session: Session, email: str, password: str
 ) -> Account:

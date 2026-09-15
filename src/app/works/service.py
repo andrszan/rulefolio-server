@@ -5,9 +5,14 @@ from sqlalchemy import delete, func, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.access.context import set_actor, set_work_management_scope
+from app.access.context import (
+    set_actor,
+    set_file_lifecycle_scope,
+    set_work_management_scope,
+)
 from app.audit.models import SecurityAudit
 from app.files import materials as material_files
+from app.files.models import StoredFile
 from app.works.models import Work, WorkMaterialFile
 from app.workspaces import service as workspaces_service
 
@@ -87,6 +92,15 @@ class WorkAccessMemberData:
     account_id: UUID
     email: str
     role: str | None
+
+
+@dataclass(frozen=True)
+class PlaytestRuleSnapshot:
+    work_name: str
+    rule_name: str
+    rule_description: str | None
+    rule_content: str
+    materials: tuple[StoredFile, ...]
 
 
 def _commit_or_rollback(session: Session) -> None:
@@ -321,6 +335,94 @@ def ensure_work_management(
     except SQLAlchemyError as error:
         session.rollback()
         raise WorkOperationRetryable from error
+
+
+def ensure_playtest_management(
+    session: Session, actor_id: UUID, workspace_id: UUID, work_id: UUID
+) -> Work:
+    """验证试玩管理角色，不改变作品资料或访问管理权限。"""
+    try:
+        work = _load_visible_work(session, workspace_id, work_id)
+        if _own_access_role(session, work.id, actor_id) not in {
+            MAINTAINER,
+            "organizer",
+        }:
+            session.rollback()
+            raise WorkManagementForbidden
+        return work
+    except (WorkManagementForbidden, WorkUnavailable):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise WorkOperationRetryable from error
+
+
+def snapshot_current_rule_materials_for_playtest(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    material_file_ids: set[UUID],
+) -> PlaytestRuleSnapshot:
+    """在作品行锁内固定当前规则和已发布材料，供场次复制使用。"""
+    try:
+        if not material_file_ids:
+            raise MaterialSelectionInvalid
+        ensure_playtest_management(session, actor_id, workspace_id, work_id)
+        session.flush()
+        work = session.scalar(
+            select(Work)
+            .where(Work.id == work_id, Work.workspace_id == workspace_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if (
+            work is None
+            or work.rule_name is None
+            or work.rule_content is None
+            or not work.rule_name.strip()
+            or not work.rule_content.strip()
+        ):
+            session.rollback()
+            raise MaterialSelectionInvalid
+        current_ids = set(
+            session.scalars(
+                select(WorkMaterialFile.file_id).where(
+                    WorkMaterialFile.work_id == work.id
+                )
+            )
+        )
+        if not material_file_ids.issubset(current_ids):
+            session.rollback()
+            raise MaterialSelectionInvalid
+        files: list[StoredFile] = []
+        for file_id in material_file_ids:
+            set_file_lifecycle_scope(session, file_id)
+            file = session.scalar(
+                select(StoredFile).where(
+                    StoredFile.id == file_id,
+                    StoredFile.workspace_id == workspace_id,
+                    StoredFile.work_id == work_id,
+                    StoredFile.kind == "material",
+                    StoredFile.status == "ready",
+                )
+            )
+            if file is None:
+                session.rollback()
+                raise MaterialSelectionInvalid
+            files.append(file)
+    except (MaterialSelectionInvalid, WorkManagementForbidden, WorkUnavailable):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise WorkOperationRetryable from error
+    return PlaytestRuleSnapshot(
+        work_name=work.name,
+        rule_name=work.rule_name,
+        rule_description=work.rule_description,
+        rule_content=work.rule_content,
+        materials=tuple(sorted(files, key=lambda item: (item.created_at, item.id))),
+    )
 
 
 def lock_work_for_files(

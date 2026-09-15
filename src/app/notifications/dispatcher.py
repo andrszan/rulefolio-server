@@ -130,18 +130,35 @@ def _claim_next(session: Session) -> DispatchClaim | None:
 
 
 def _load_claim(session: Session, claim: DispatchClaim) -> MailOutbox | None:
-    outbox = session.scalar(
-        select(MailOutbox)
+    statement = select(MailOutbox).where(
+        MailOutbox.id == claim.outbox_id,
+        MailOutbox.status == "sending",
+        MailOutbox.claim_id == claim.claim_id,
+    )
+    outbox = session.scalar(statement)
+    if outbox is None:
+        session.rollback()
+        return None
+    if outbox.credential_id is not None:
+        outbox = session.scalar(statement.with_for_update())
+        if outbox is None:
+            session.rollback()
+    return outbox
+
+
+def _start_smtp(session: Session, claim: DispatchClaim) -> bool:
+    result = session.execute(
+        update(MailOutbox)
         .where(
             MailOutbox.id == claim.outbox_id,
             MailOutbox.status == "sending",
             MailOutbox.claim_id == claim.claim_id,
+            MailOutbox.smtp_started_at.is_(None),
         )
-        .with_for_update()
+        .values(smtp_started_at=_now())
     )
-    if outbox is None:
-        session.rollback()
-    return outbox
+    session.commit()
+    return result.rowcount == 1
 
 
 def _update_claim(
@@ -231,57 +248,69 @@ def _dispatch_one(session: Session) -> str | None:
     outbox = _load_claim(session, claim)
     if outbox is None:
         return "superseded"
-    credential = session.scalar(
-        select(OneTimeCredential)
-        .where(OneTimeCredential.id == outbox.credential_id)
-        .with_for_update()
-    )
     account = session.get(Account, outbox.recipient_account_id)
-    invitation: WorkspaceInvitation | None = None
-    if credential is not None and outbox.purpose == "workspace_invitation":
-        set_invitation_credential(session, credential.id)
-        invitation = session.scalar(
-            select(WorkspaceInvitation)
-            .where(WorkspaceInvitation.credential_id == credential.id)
+    if outbox.credential_id is None:
+        if (
+            account is None
+            or account.status != "active"
+            or not outbox.frozen_subject
+            or not outbox.frozen_body
+        ):
+            _mark_ineligible(session, claim)
+            return "cancelled"
+        subject, body = outbox.frozen_subject, outbox.frozen_body
+    else:
+        credential = session.scalar(
+            select(OneTimeCredential)
+            .where(OneTimeCredential.id == outbox.credential_id)
             .with_for_update()
         )
-    if (
-        credential is None
-        or account is None
-        or credential.purpose != outbox.purpose
-        or credential.status != "active"
-        or credential.expires_at <= _now()
-        or (
-            outbox.purpose == "account_activation"
-            and account.status != "pending_activation"
-        )
-        or (outbox.purpose == "password_recovery" and account.status != "active")
-        or (
-            outbox.purpose == "workspace_invitation"
-            and (
-                invitation is None
-                or invitation.status != "active"
-                or invitation.account_id != account.id
-                or account.status not in {"active", "pending_activation"}
-                or not outbox.workspace_name
+        invitation: WorkspaceInvitation | None = None
+        if credential is not None and outbox.purpose == "workspace_invitation":
+            set_invitation_credential(session, credential.id)
+            invitation = session.scalar(
+                select(WorkspaceInvitation)
+                .where(WorkspaceInvitation.credential_id == credential.id)
+                .with_for_update()
             )
-        )
-    ):
-        _mark_ineligible(session, claim)
-        return "cancelled"
+        if (
+            credential is None
+            or account is None
+            or credential.purpose != outbox.purpose
+            or credential.status != "active"
+            or credential.expires_at <= _now()
+            or (
+                outbox.purpose == "account_activation"
+                and account.status != "pending_activation"
+            )
+            or (outbox.purpose == "password_recovery" and account.status != "active")
+            or (
+                outbox.purpose == "workspace_invitation"
+                and (
+                    invitation is None
+                    or invitation.status != "active"
+                    or invitation.account_id != account.id
+                    or account.status not in {"active", "pending_activation"}
+                    or not outbox.workspace_name
+                )
+            )
+        ):
+            _mark_ineligible(session, claim)
+            return "cancelled"
+        try:
+            token = decrypt_token(outbox)
+            subject, body = _message_content(
+                outbox.purpose, token, outbox.workspace_name
+            )
+        except Exception:
+            _mark_ineligible(session, claim)
+            return "cancelled"
 
-    try:
-        token = decrypt_token(outbox)
-        subject, body = _message_content(outbox.purpose, token, outbox.workspace_name)
-    except Exception:
-        _mark_ineligible(session, claim)
-        return "cancelled"
-
-    outbox.smtp_started_at = _now()
-    session.commit()
+    if not _start_smtp(session, claim):
+        return "superseded"
     try:
         _send(account.email, subject, body)
-    except (TimeoutError, OSError, smtplib.SMTPServerDisconnected):
+    except smtplib.SMTPServerDisconnected:
         return "unknown" if _mark_unknown(session, claim) else "superseded"
     except smtplib.SMTPException:
         if not _mark_failed(session, claim):
@@ -289,6 +318,8 @@ def _dispatch_one(session: Session) -> str | None:
         return (
             "pending" if claim.attempt_count < settings.mail_max_attempts else "failed"
         )
+    except (TimeoutError, OSError):
+        return "unknown" if _mark_unknown(session, claim) else "superseded"
     return "accepted" if _mark_accepted(session, claim) else "superseded"
 
 

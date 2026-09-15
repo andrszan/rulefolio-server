@@ -1,7 +1,17 @@
 from datetime import datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import DateTime, ForeignKey, Integer, LargeBinary, String, func
+from sqlalchemy import (
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    LargeBinary,
+    String,
+    func,
+    text,
+)
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -10,15 +20,28 @@ from app.core.database import Base
 
 class MailOutbox(Base):
     __tablename__ = "mail_outbox"
+    __table_args__ = (
+        CheckConstraint(
+            "(credential_id IS NOT NULL AND business_scope IS NULL "
+            "AND frozen_subject IS NULL AND frozen_body IS NULL) OR "
+            "(credential_id IS NULL AND btrim(business_scope) <> '' "
+            "AND btrim(frozen_subject) <> '' AND btrim(frozen_body) <> '')",
+            name="ck_mail_outbox_delivery_shape",
+        ),
+        Index(
+            "uq_mail_outbox_credential",
+            "credential_id",
+            unique=True,
+            postgresql_where=text("credential_id IS NOT NULL"),
+        ),
+    )
 
     id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
     )
-    credential_id: Mapped[UUID] = mapped_column(
+    credential_id: Mapped[UUID | None] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
         ForeignKey("identity_one_time_credentials.id", ondelete="CASCADE"),
-        unique=True,
-        nullable=False,
     )
     recipient_account_id: Mapped[UUID] = mapped_column(
         PostgreSQLUUID(as_uuid=True),
@@ -27,6 +50,9 @@ class MailOutbox(Base):
     )
     purpose: Mapped[str] = mapped_column(String(32), nullable=False)
     workspace_name: Mapped[str | None] = mapped_column(String(160))
+    business_scope: Mapped[str | None] = mapped_column(String(128))
+    frozen_subject: Mapped[str | None] = mapped_column(String(200))
+    frozen_body: Mapped[str | None] = mapped_column(String(4_000))
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
     claim_id: Mapped[UUID | None] = mapped_column(PostgreSQLUUID(as_uuid=True))
     token_ciphertext: Mapped[bytes | None] = mapped_column(LargeBinary)

@@ -808,3 +808,32 @@ def open_material(
     file_id: UUID,
 ) -> ImageStream:
     return _open_file(session, actor_id, workspace_id, work_id, file_id, "material")
+
+
+def open_playtest_material(session: Session, file_id: UUID) -> ImageStream:
+    """仅供已验证场次关系调用，按精确材料 ID 打开私有对象。"""
+    try:
+        set_file_lifecycle_scope(session, file_id)
+        file = session.scalar(
+            select(StoredFile).where(
+                StoredFile.id == file_id,
+                StoredFile.kind == "material",
+                StoredFile.status == "ready",
+            )
+        )
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise FileOperationRetryable from error
+    if file is None:
+        session.rollback()
+        raise MaterialUnavailable
+    data = materials.material_data(file)
+    object_key = file.object_key
+    session.rollback()
+    try:
+        body = storage.open_object(object_key)
+    except storage.StorageUnavailable as error:
+        raise FileOperationRetryable from error
+    if body is None:
+        raise FileOperationRetryable
+    return ImageStream(image=data, body=body)

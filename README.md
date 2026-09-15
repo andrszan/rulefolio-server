@@ -2,7 +2,7 @@
 
 本仓库是好玩实验室（`rulefolio`）的 API 服务，使用 FastAPI、同步 SQLAlchemy 2.x、Psycopg 3、PostgreSQL、Alembic、Pydantic v2、pytest 和 Ruff。
 
-当前已提供应用配置、数据库连接、请求日志、错误响应、CORS、`/health`、`/ready`，以及账户开通、Argon2id 密码、opaque session、恢复凭据、Outbox 和 SMTP 派发能力；还包括私有工作空间、成员、邮件邀请及邀请兑换，以及默认私有的作品、基础资料更新、作品级访问控制、作品图片和唯一当前规则材料的上传、列表、预览与下载。维护者保存规则名称、可选说明、正文和完整当前材料集合；组织者与协作者只能读取当前关联的材料。项目维护者可从空的项目数据库与私有桶创建交付基线，或经明确确认重置该项目范围。草稿、发布、版本历史、场次、反馈和问题能力尚未实现。
+当前已提供应用配置、数据库连接、请求日志、错误响应、CORS、`/health`、`/ready`，以及账户开通、Argon2id 密码、opaque session、恢复凭据、Outbox 和 SMTP 派发能力；还包括私有工作空间、成员、邮件邀请及邀请兑换，以及默认私有的作品、基础资料更新、作品级访问控制、作品图片和唯一当前规则材料的上传、列表、预览与下载。维护者和组织者可创建试玩计划、安排场次、固定规则与材料快照、邀请已有激活账户、修改安排、开始或取消场次；受邀账户仅能读取自己的场次和固定材料并确认参加。维护者保存规则名称、可选说明、正文和完整当前材料集合；组织者与协作者只能读取当前关联的材料。项目维护者可从空的项目数据库与私有桶创建交付基线，或经明确确认重置该项目范围。草稿、发布、版本历史、实际到场、反馈和问题能力尚未实现。
 
 ## 环境要求
 
@@ -56,7 +56,7 @@ API 文档默认位于：
 - `S3_*`：私有当前规则材料和作品图片的对象存储绑定。
 - `SMTP_*` 与 `MAIL_*`：开发邮件发送和测试收件人绑定。
 
-S3 资源已由作品图片及当前规则材料业务以私有条件写入、服务端复核和受授权的流式读取方式消费；材料不会提供公开 URL 或对象存储直连。SMTP 资源仍只供邮件业务使用。不得以基础工程存在配置键为由宣称未实现的能力已经可用。
+S3 资源已由作品图片、当前规则材料和已授权试玩场次的固定材料以私有条件写入、服务端复核和受授权的流式读取方式消费；材料不会提供公开 URL 或对象存储直连。SMTP 资源用于凭据邮件及已冻结正文的试玩邀请、改期、材料更新和取消提醒；SMTP 已接受只表示邮件服务接受请求，不表示已阅读。不得以基础工程存在配置键为由宣称未实现的能力已经可用。
 
 `CORS_ORIGINS` 使用 JSON 字符串数组。本地配置只允许 `http://127.0.0.1:3105`。真实密码、访问密钥和邮件凭据不得进入源码、公开示例、日志或提交。
 
@@ -80,7 +80,7 @@ uv run --locked python -m app.manage_workspaces \
   --reason <approved-reason>
 ```
 
-初始化只接受操作者和理由，在当前项目数据库和私有桶均为空时创建交付账号、工作空间、作品、角色和图片；已有数据时不修改。重置会删除当前配置绑定的全部项目记录与对象，执行前先停止本项目 API 与邮件派发进程，并使用当前 `DB_NAME:S3_BUCKET_NAME` 明确确认：
+初始化只接受操作者和理由，在当前项目数据库和私有桶均为空时创建交付账号、工作空间、作品、角色、图片、两场近期试玩、一次确认参加和经 dispatcher 实际处理的一条试玩邀请；`playtest-guest@example.com` 是不加入工作空间也没有作品访问关系的受邀试玩账号。已有数据时不修改。重置会删除当前配置绑定的全部项目记录与对象，执行前先停止本项目 API 与邮件派发进程，并使用当前 `DB_NAME:S3_BUCKET_NAME` 明确确认：
 
 ```bash
 uv run --locked python -m app.manage_project initialize \
@@ -117,7 +117,8 @@ src/app/
 ├── api.py                 # 业务 API 聚合
 ├── files/                 # 私有图片与材料的检测、对象生命周期与 HTTP router
 ├── identity/              # 账户、密码、session 与一次性凭据
-├── notifications/         # Outbox、SMTP adapter 与派发状态
+├── notifications/         # 凭据与冻结业务邮件的 Outbox、SMTP adapter 与派发状态
+├── playtests/             # 测试计划、场次快照、参与确认与受限材料读取
 ├── workspaces/            # 工作空间、成员、邀请、兑换与作品访问关系
 ├── works/                 # 私有作品、基础资料、当前规则材料与作品级访问服务
 ├── manage_identity.py     # 受控账户开通与 Outbox 诊断命令
@@ -129,7 +130,7 @@ src/app/
 └── main.py                # 应用装配
 ```
 
-业务 router 通过 `src/app/api.py` 聚合，并由 `API_PREFIX` 统一挂载。业务成功响应使用 `ApiResponse[T]`；`/health` 与 `/ready` 不使用业务响应包装。数据库 Schema 只通过 Alembic 变更，不在启动时调用 `create_all()` 或自动迁移。认证 API 位于 `/sessions`、`/sessions/current`、`/account-recovery-requests`、`/account-activations/exchanges` 和 `/account-recovery-exchanges`；工作空间及作品 API 位于 `/workspaces` 与其下的 `/works`，图片 API 位于作品路径下的 `/images`，当前规则材料 API 位于 `/rule-materials` 与 `/material-files`，邀请兑换位于 `/workspace-invitation-exchanges`。作品、当前规则和当前材料只向同时具有当前工作空间成员资格与作品访问关系的账户返回；维护者才可更新资料、保存规则材料或读取材料候选。工作空间邀请使用 `Idempotency-Key`，token 仅可放在兑换请求体。具体字段和错误 reason 以 OpenAPI 为准。
+业务 router 通过 `src/app/api.py` 聚合，并由 `API_PREFIX` 统一挂载。业务成功响应使用 `ApiResponse[T]`；`/health` 与 `/ready` 不使用业务响应包装。数据库 Schema 只通过 Alembic 变更，不在启动时调用 `create_all()` 或自动迁移。认证 API 位于 `/sessions`、`/sessions/current`、`/account-recovery-requests`、`/account-activations/exchanges` 和 `/account-recovery-exchanges`；工作空间及作品 API 位于 `/workspaces` 与其下的 `/works`，图片 API 位于作品路径下的 `/images`，当前规则材料 API 位于 `/rule-materials` 与 `/material-files`，试玩计划管理 API 位于作品路径下的 `/playtest-plans` 和 `/playtest-sessions`，受邀者入口位于 `/playtest-sessions/{sessionId}`，邀请兑换位于 `/workspace-invitation-exchanges`。作品、当前规则和当前材料只向同时具有当前工作空间成员资格与作品访问关系的账户返回；维护者才可更新资料、保存规则材料或读取材料候选；维护者和组织者可管理试玩，受邀试玩者不因此获得作品或工作空间权限。工作空间邀请使用 `Idempotency-Key`，token 仅可放在兑换请求体。具体字段和错误 reason 以 OpenAPI 为准。
 
 ## 验证与构建
 

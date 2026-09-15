@@ -13,6 +13,11 @@ from app.files.models import StoredFile
 from app.identity import service as identity_service
 from app.identity.models import Account, OneTimeCredential, SessionRecord
 from app.notifications.models import MailOutbox
+from app.playtests.models import (
+    PlaytestPlan,
+    PlaytestSession,
+    PlaytestSessionParticipant,
+)
 from app.project_baseline import (
     BASELINE_ACCOUNTS,
     BASELINE_IMAGE,
@@ -24,7 +29,7 @@ from app.project_baseline import (
     reset_confirmation,
 )
 from app.works.models import Work, WorkMaterialFile
-from app.workspaces.models import WorkAccess, Workspace
+from app.workspaces.models import WorkAccess, Workspace, WorkspaceMember
 
 pytestmark = pytest.mark.skipif(
     settings.db_name != "rulefolio_test"
@@ -48,11 +53,40 @@ def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID, tuple[UUID, ...]]:
         accesses = list(session.scalars(select(WorkAccess)))
         files = list(session.scalars(select(StoredFile)))
         material_relations = list(session.scalars(select(WorkMaterialFile)))
+        plans = list(session.scalars(select(PlaytestPlan)))
+        sessions = list(session.scalars(select(PlaytestSession)))
+        participants = list(session.scalars(select(PlaytestSessionParticipant)))
         assert [account.email for account in accounts] == sorted(
             account.email for account in BASELINE_ACCOUNTS
         )
-        assert len(workspaces) == len(works) == 1
+        assert len(workspaces) == len(works) == len(plans) == 1
         assert len(accesses) == 3
+        assert len(sessions) == 2
+        assert len(participants) == 2
+        assert (
+            sum(participant.status == "confirmed" for participant in participants) == 1
+        )
+        playtester = next(
+            account
+            for account in accounts
+            if account.email == "playtest-guest@example.com"
+        )
+        assert (
+            session.scalar(
+                select(WorkspaceMember.id).where(
+                    WorkspaceMember.account_id == playtester.id
+                )
+            )
+            is None
+        )
+        assert (
+            session.scalar(
+                select(WorkAccess.account_id).where(
+                    WorkAccess.account_id == playtester.id
+                )
+            )
+            is None
+        )
         images = [file for file in files if file.kind == "image"]
         materials = sorted(
             (file for file in files if file.kind == "material"),
@@ -64,7 +98,12 @@ def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID, tuple[UUID, ...]]:
             material.id for material in materials
         }
         assert session.scalar(select(func.count()).select_from(OneTimeCredential)) == 0
-        assert session.scalar(select(func.count()).select_from(MailOutbox)) == 0
+        outbox_statuses = list(session.scalars(select(MailOutbox.status)))
+        assert len(outbox_statuses) == 2
+        assert any(
+            status in {"accepted", "failed", "unknown", "pending"}
+            for status in outbox_statuses
+        )
         assert session.scalar(select(func.count()).select_from(SessionRecord)) == 0
         owner = next(
             account
@@ -207,7 +246,7 @@ def test_initialize_reports_only_committed_counts_on_image_failure(
         initialize(session, "pytest", "图片失败验证")
     assert error.value.phase == "image"
     assert error.value.counts == {
-        "accounts": 3,
+        "accounts": 4,
         "workspaces": 1,
         "works": 1,
         "accesses": 3,
@@ -215,7 +254,7 @@ def test_initialize_reports_only_committed_counts_on_image_failure(
     assert storage.list_object_keys() == []
     with SessionLocal() as session:
         set_project_baseline_scope(session)
-        assert session.scalar(select(func.count()).select_from(Account)) == 3
+        assert session.scalar(select(func.count()).select_from(Account)) == 4
         assert session.scalar(select(func.count()).select_from(Workspace)) == 1
         assert session.scalar(select(func.count()).select_from(Work)) == 1
         assert session.scalar(select(func.count()).select_from(WorkAccess)) == 3

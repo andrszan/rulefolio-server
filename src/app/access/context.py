@@ -46,6 +46,21 @@ def set_file_recovery_work_scope(session: Session, work_id: UUID) -> None:
     _set_scope(session, "app.file_recovery_work_id", work_id)
 
 
+def set_playtest_management_scope(
+    session: Session, workspace_id: UUID, work_id: UUID
+) -> None:
+    _set_scope(session, "app.playtest_management_workspace_id", workspace_id)
+    _set_scope(session, "app.playtest_management_work_id", work_id)
+
+
+def set_playtest_session_scope(session: Session, session_id: UUID) -> None:
+    _set_scope(session, "app.playtest_session_id", session_id)
+
+
+def set_playtest_participant_lookup_scope(session: Session, session_id: UUID) -> None:
+    _set_scope(session, "app.playtest_participant_lookup_session_id", session_id)
+
+
 def set_project_baseline_scope(session: Session) -> None:
     session.execute(
         text("SELECT set_config('app.project_baseline_maintenance', 'active', true)")

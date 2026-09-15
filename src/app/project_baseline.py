@@ -4,6 +4,7 @@ import hmac
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy import delete, func, select, text
@@ -26,7 +27,15 @@ from app.identity.models import (
     RecoveryRequestJob,
     SessionRecord,
 )
+from app.notifications import dispatcher as mail_dispatcher
 from app.notifications.models import MailOutbox
+from app.playtests import service as playtests_service
+from app.playtests.models import (
+    PlaytestPlan,
+    PlaytestSession,
+    PlaytestSessionMaterial,
+    PlaytestSessionParticipant,
+)
 from app.works import service as works_service
 from app.works.models import Work, WorkMaterialFile
 from app.workspaces import service as workspaces_service
@@ -73,6 +82,7 @@ BASELINE_ACCOUNTS = (
     BaselineAccount("studio-owner@example.com", "maintainer"),
     BaselineAccount("session-organizer@example.com", "organizer"),
     BaselineAccount("rules-collaborator@example.com", "collaborator"),
+    BaselineAccount("playtest-guest@example.com", "playtester"),
 )
 BASELINE_SCOPE = "project_baseline"
 BASELINE_IMAGE = Path(__file__).with_name("baseline-work.jpg")
@@ -137,6 +147,10 @@ def _record_count(session: Session) -> int:
         Work,
         WorkAccess,
         WorkMaterialFile,
+        PlaytestPlan,
+        PlaytestSession,
+        PlaytestSessionMaterial,
+        PlaytestSessionParticipant,
         StoredFile,
     )
     return sum(
@@ -157,12 +171,15 @@ def _preflight(session: Session) -> tuple[list[str], int]:
 
 def _baseline_counts() -> dict[str, int]:
     return {
-        "accounts": 3,
+        "accounts": 4,
         "workspaces": 1,
         "works": 1,
         "accesses": 3,
         "images": 1,
         "materials": 2,
+        "playtest_plans": 1,
+        "playtest_sessions": 2,
+        "playtest_confirmations": 1,
     }
 
 
@@ -214,7 +231,7 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
 
         phase = "members"
         set_actor(session, owner.id)
-        for account in accounts[1:]:
+        for account in accounts[1:3]:
             workspaces_service.add_baseline_member(session, workspace.id, account.id)
         _commit(session)
         counts["workspaces"] = 1
@@ -238,7 +255,7 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
 
         phase = "access"
         for account, baseline_account in zip(
-            accounts[1:], BASELINE_ACCOUNTS[1:], strict=True
+            accounts[1:3], BASELINE_ACCOUNTS[1:3], strict=True
         ):
             set_actor(session, owner.id)
             works_service.set_work_access(
@@ -296,6 +313,37 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
             expected_revision=work.revision,
         )
 
+        phase = "playtests"
+        playtester = accounts[3]
+        plan = playtests_service.create_plan(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            "观察玩家在信息不足时是否会主动协作并记录线索。",
+            "由组织者记录每轮决策和出现的讨论。",
+            (
+                playtests_service.SessionDraft(
+                    scheduled_at=datetime.now(UTC) + timedelta(days=2),
+                    location="工作室试玩桌 A",
+                    capacity=4,
+                    material_file_ids=tuple(material.id for material in materials),
+                    participant_emails=(playtester.email,),
+                ),
+                playtests_service.SessionDraft(
+                    scheduled_at=datetime.now(UTC) + timedelta(days=5),
+                    location="工作室试玩桌 B",
+                    capacity=4,
+                    material_file_ids=(materials[0].id,),
+                    participant_emails=(playtester.email,),
+                ),
+            ),
+        )
+        playtests_service.confirm_participation(
+            session, playtester.id, plan.sessions[0].id
+        )
+        mail_dispatcher.dispatch_one(session)
+
         phase = "audit"
         session.add(
             SecurityAudit(
@@ -320,6 +368,10 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
 def _clear_database(session: Session) -> int:
     set_project_baseline_scope(session)
     models = (
+        PlaytestSessionMaterial,
+        PlaytestSessionParticipant,
+        PlaytestSession,
+        PlaytestPlan,
         WorkMaterialFile,
         StoredFile,
         WorkAccess,

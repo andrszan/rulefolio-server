@@ -296,7 +296,7 @@ def test_invitation_dispatch_and_revocation_share_lock_order(
     assert not dispatch_thread.is_alive()
     assert not revoke_thread.is_alive()
     assert errors == []
-    assert results["dispatch"] in {"accepted", "superseded"}
+    assert results["dispatch"] in {"accepted", "cancelled", "superseded"}
     revoked = results["revoke"]
     assert isinstance(revoked, service.WorkspaceInvitationData)
     assert revoked.status == "revoked"
