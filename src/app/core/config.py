@@ -43,6 +43,13 @@ class Settings(BaseSettings):
     token_encryption_key: SecretStr = SecretStr("")
     token_encryption_key_version: int = Field(default=1, ge=1)
     auth_attempt_pepper: SecretStr = SecretStr("")
+    s3_endpoint: str = ""
+    s3_region: str = "us-east-1"
+    s3_access_key_id: str = ""
+    s3_secret_access_key: SecretStr = SecretStr("")
+    s3_bucket_name: str = ""
+    s3_test_bucket_name: str = ""
+    s3_use_path_style: bool = True
     mail_driver: Literal["smtp"] = "smtp"
     smtp_host: str = ""
     smtp_port: int = Field(default=465, ge=1, le=65535)

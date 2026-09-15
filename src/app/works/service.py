@@ -282,6 +282,45 @@ def list_works(
     return ([_work_data(work, role) for work, role in rows], total)
 
 
+def ensure_work_access(
+    session: Session, actor_id: UUID, workspace_id: UUID, work_id: UUID
+) -> None:
+    try:
+        work = _load_visible_work(session, workspace_id, work_id)
+        if _own_access_role(session, work.id, actor_id) is None:
+            session.rollback()
+            raise WorkUnavailable
+    except WorkUnavailable:
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise WorkOperationRetryable from error
+
+
+def lock_work_for_files(
+    session: Session, actor_id: UUID, workspace_id: UUID, work_id: UUID
+) -> None:
+    try:
+        session.execute(
+            select(
+                func.pg_advisory_xact_lock(
+                    int.from_bytes(work_id.bytes[:8], byteorder="big", signed=True)
+                )
+            )
+        )
+        work = session.scalar(
+            select(Work).where(Work.id == work_id, Work.workspace_id == workspace_id)
+        )
+        if work is None or _own_access_role(session, work_id, actor_id) is None:
+            session.rollback()
+            raise WorkUnavailable
+    except WorkUnavailable:
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise WorkOperationRetryable from error
+
+
 def read_work(
     session: Session, actor_id: UUID, workspace_id: UUID, work_id: UUID
 ) -> WorkData:

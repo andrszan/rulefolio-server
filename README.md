@@ -2,7 +2,7 @@
 
 本仓库是好玩实验室（`rulefolio`）的 API 服务，使用 FastAPI、同步 SQLAlchemy 2.x、Psycopg 3、PostgreSQL、Alembic、Pydantic v2、pytest 和 Ruff。
 
-当前已提供应用配置、数据库连接、请求日志、错误响应、CORS、`/health`、`/ready`，以及账户开通、Argon2id 密码、opaque session、恢复凭据、Outbox 和 SMTP 派发能力；还包括私有工作空间、成员、邮件邀请及邀请兑换，以及默认私有的作品、基础资料更新和作品级访问控制。版本、场次、反馈、问题和文件能力尚未实现。
+当前已提供应用配置、数据库连接、请求日志、错误响应、CORS、`/health`、`/ready`，以及账户开通、Argon2id 密码、opaque session、恢复凭据、Outbox 和 SMTP 派发能力；还包括私有工作空间、成员、邮件邀请及邀请兑换，以及默认私有的作品、基础资料更新、作品级访问控制和作品图片的私有上传、列表、预览与下载。版本、场次、反馈和问题能力尚未实现。
 
 ## 环境要求
 
@@ -55,7 +55,7 @@ API 文档默认位于：
 - `S3_*`：私有版本材料和作品图片的对象存储绑定。
 - `SMTP_*` 与 `MAIL_*`：开发邮件发送和测试收件人绑定。
 
-S3 和 SMTP 资源已经准备并验证，但当前业务代码尚未消费这些配置；后续只能在对应文件或邮件业务实现中接入，不得以基础工程存在配置键为由宣称能力已经可用。
+S3 资源已由作品图片业务以私有条件写入、服务端复核和受授权的流式读取方式消费；SMTP 资源仍只供邮件业务使用。不得以基础工程存在配置键为由宣称未实现的能力已经可用。
 
 `CORS_ORIGINS` 使用 JSON 字符串数组。本地配置只允许 `http://127.0.0.1:3105`。真实密码、访问密钥和邮件凭据不得进入源码、公开示例、日志或提交。
 
@@ -100,6 +100,7 @@ uv run --locked python -m app.manage_identity outbox \
 src/app/
 ├── core/       # 配置、数据库、响应、错误、日志与 middleware
 ├── api.py                 # 业务 API 聚合
+├── files/                 # 私有图片的检测、对象生命周期与 HTTP router
 ├── identity/              # 账户、密码、session 与一次性凭据
 ├── notifications/         # Outbox、SMTP adapter 与派发状态
 ├── workspaces/            # 工作空间、成员、邀请、兑换与作品访问关系
@@ -111,7 +112,7 @@ src/app/
 └── main.py                # 应用装配
 ```
 
-业务 router 通过 `src/app/api.py` 聚合，并由 `API_PREFIX` 统一挂载。业务成功响应使用 `ApiResponse[T]`；`/health` 与 `/ready` 不使用业务响应包装。数据库 Schema 只通过 Alembic 变更，不在启动时调用 `create_all()` 或自动迁移。认证 API 位于 `/sessions`、`/sessions/current`、`/account-recovery-requests`、`/account-activations/exchanges` 和 `/account-recovery-exchanges`；工作空间及作品 API 位于 `/workspaces` 与其下的 `/works`，邀请兑换位于 `/workspace-invitation-exchanges`。作品只向同时具有当前工作空间成员资格与作品访问关系的账户返回，维护者才可更新资料或管理访问。工作空间邀请使用 `Idempotency-Key`，token 仅可放在兑换请求体。具体字段和错误 reason 以 OpenAPI 为准。
+业务 router 通过 `src/app/api.py` 聚合，并由 `API_PREFIX` 统一挂载。业务成功响应使用 `ApiResponse[T]`；`/health` 与 `/ready` 不使用业务响应包装。数据库 Schema 只通过 Alembic 变更，不在启动时调用 `create_all()` 或自动迁移。认证 API 位于 `/sessions`、`/sessions/current`、`/account-recovery-requests`、`/account-activations/exchanges` 和 `/account-recovery-exchanges`；工作空间及作品 API 位于 `/workspaces` 与其下的 `/works`，图片 API 位于作品路径下的 `/images`，邀请兑换位于 `/workspace-invitation-exchanges`。作品和图片只向同时具有当前工作空间成员资格与作品访问关系的账户返回，维护者才可更新资料或管理访问。工作空间邀请使用 `Idempotency-Key`，token 仅可放在兑换请求体。具体字段和错误 reason 以 OpenAPI 为准。
 
 ## 验证与构建
 
