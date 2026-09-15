@@ -15,7 +15,14 @@ from app.access.context import set_actor, set_project_baseline_scope
 from app.audit.models import SecurityAudit
 from app.core.config import settings
 from app.core.database import engine
-from app.evidence.models import PlaytestObservation
+from app.evidence import service as evidence_service
+from app.evidence.models import (
+    PlaytestFeedbackAnswer,
+    PlaytestFeedbackItem,
+    PlaytestFeedbackOption,
+    PlaytestFeedbackSubmission,
+    PlaytestObservation,
+)
 from app.files import service as files_service
 from app.files import storage
 from app.files.models import StoredFile
@@ -156,6 +163,10 @@ def _record_count(session: Session) -> int:
         PlaytestSessionActualParticipant,
         PlaytestSessionMaterial,
         PlaytestSessionParticipant,
+        PlaytestFeedbackAnswer,
+        PlaytestFeedbackSubmission,
+        PlaytestFeedbackOption,
+        PlaytestFeedbackItem,
         PlaytestObservation,
         StoredFile,
     )
@@ -188,6 +199,9 @@ def _baseline_counts() -> dict[str, int]:
         "playtest_confirmations": 1,
         "playtest_actual_participants": 2,
         "playtest_observations": 3,
+        "playtest_feedback_items": 3,
+        "playtest_feedback_submissions": 2,
+        "playtest_feedback_answers": 4,
     }
 
 
@@ -410,6 +424,92 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
             "organizer_interpretation",
             "分工出现得早，现有提示已经足以引导协作。",
         )
+        feedback_items = (
+            playtests_service.create_feedback_item(
+                session,
+                owner.id,
+                workspace.id,
+                work.id,
+                first_started.id,
+                "baseline-feedback-item-open",
+                evidence_service.FeedbackItemDraft(
+                    kind="short_text",
+                    question="哪一段规则最需要进一步说明？",
+                    options=(),
+                ),
+            ),
+            playtests_service.create_feedback_item(
+                session,
+                owner.id,
+                workspace.id,
+                work.id,
+                first_started.id,
+                "baseline-feedback-item-choice",
+                evidence_service.FeedbackItemDraft(
+                    kind="single_choice",
+                    question="本场协作节奏如何？",
+                    options=("过慢", "合适", "过快"),
+                ),
+            ),
+            playtests_service.create_feedback_item(
+                session,
+                owner.id,
+                workspace.id,
+                work.id,
+                first_started.id,
+                "baseline-feedback-item-number",
+                evidence_service.FeedbackItemDraft(
+                    kind="number",
+                    question="你愿意再次试玩的意愿（0 到 10 分）",
+                    options=(),
+                ),
+            ),
+        )
+        playtests_service.save_participant_feedback(
+            session,
+            playtester.id,
+            first_started.id,
+            "baseline-feedback-direct",
+            None,
+            evidence_service.FeedbackSubmissionDraft(
+                source="direct",
+                temporary_alias=None,
+                status="submitted",
+                answers=(
+                    evidence_service.FeedbackAnswerDraft(
+                        item_id=feedback_items[0].id,
+                        text_value="终局结算的触发顺序还需要举例说明。",
+                    ),
+                    evidence_service.FeedbackAnswerDraft(
+                        item_id=feedback_items[1].id,
+                        option_id=feedback_items[1].options[1].id,
+                    ),
+                    evidence_service.FeedbackAnswerDraft(
+                        item_id=feedback_items[2].id,
+                        number_value=8,
+                    ),
+                ),
+            ),
+        )
+        playtests_service.create_feedback_submission(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            first_started.id,
+            "baseline-feedback-organizer",
+            evidence_service.FeedbackSubmissionDraft(
+                source="oral_discussion",
+                temporary_alias=None,
+                status="submitted",
+                answers=(
+                    evidence_service.FeedbackAnswerDraft(
+                        item_id=feedback_items[0].id,
+                        text_value="口头复盘也提到终局说明需要更直观。",
+                    ),
+                ),
+            ),
+        )
 
         second_started = playtests_service.start_session(
             session,
@@ -482,6 +582,10 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
 def _clear_database(session: Session) -> int:
     set_project_baseline_scope(session)
     models = (
+        PlaytestFeedbackAnswer,
+        PlaytestFeedbackSubmission,
+        PlaytestFeedbackOption,
+        PlaytestFeedbackItem,
         PlaytestObservation,
         PlaytestSessionActualMaterial,
         PlaytestSessionActualParticipant,

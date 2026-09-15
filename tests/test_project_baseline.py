@@ -7,7 +7,12 @@ from app import project_baseline
 from app.access.context import set_actor, set_project_baseline_scope
 from app.core.config import settings
 from app.core.database import SessionLocal
-from app.evidence.models import PlaytestObservation
+from app.evidence.models import (
+    PlaytestFeedbackAnswer,
+    PlaytestFeedbackItem,
+    PlaytestFeedbackSubmission,
+    PlaytestObservation,
+)
 from app.files import service as files_service
 from app.files import storage
 from app.files.models import StoredFile
@@ -64,6 +69,9 @@ def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID, tuple[UUID, ...]]:
             session.scalars(select(PlaytestSessionActualParticipant))
         )
         observations = list(session.scalars(select(PlaytestObservation)))
+        feedback_items = list(session.scalars(select(PlaytestFeedbackItem)))
+        feedback_submissions = list(session.scalars(select(PlaytestFeedbackSubmission)))
+        feedback_answers = list(session.scalars(select(PlaytestFeedbackAnswer)))
         assert [account.email for account in accounts] == sorted(
             account.email for account in BASELINE_ACCOUNTS
         )
@@ -82,6 +90,12 @@ def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID, tuple[UUID, ...]]:
             "fact",
             "organizer_interpretation",
             "temporary_variant",
+        }
+        assert len(feedback_items) == 3
+        assert len(feedback_submissions) == 2
+        assert len(feedback_answers) == 4
+        assert {submission.status for submission in feedback_submissions} == {
+            "submitted"
         }
         assert (
             sum(participant.status == "confirmed" for participant in participants) == 1

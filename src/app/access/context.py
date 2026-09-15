@@ -65,6 +65,18 @@ def set_playtest_participant_lookup_scope(session: Session, session_id: UUID) ->
     _set_scope(session, "app.playtest_participant_lookup_session_id", session_id)
 
 
+def set_feedback_management_scope(session: Session, session_id: UUID) -> None:
+    _set_scope(session, "app.feedback_management_session_id", session_id)
+
+
+def set_feedback_participant_scope(session: Session, session_id: UUID) -> None:
+    _set_scope(session, "app.feedback_participant_session_id", session_id)
+
+
+def set_feedback_answer_item_lock_scope(session: Session, item_id: UUID) -> None:
+    _set_scope(session, "app.feedback_answer_item_lock_id", item_id)
+
+
 def set_project_baseline_scope(session: Session) -> None:
     session.execute(
         text("SELECT set_config('app.project_baseline_maintenance', 'active', true)")

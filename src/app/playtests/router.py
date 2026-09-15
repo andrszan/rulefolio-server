@@ -1,8 +1,9 @@
+import re
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Header, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
@@ -111,6 +112,49 @@ class MaterialResponseData(BaseModel):
     sha256: str
 
 
+class FeedbackOptionResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: UUID
+    label: str
+    position: int
+
+
+class FeedbackItemResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: UUID
+    kind: str
+    question: str
+    revision: int
+    is_locked: bool = Field(serialization_alias="isLocked")
+    options: list[FeedbackOptionResponseData]
+
+
+class FeedbackAnswerResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    item_id: UUID = Field(serialization_alias="itemId")
+    kind: str
+    text_value: str | None = Field(serialization_alias="textValue")
+    option_id: UUID | None = Field(serialization_alias="optionId")
+    number_value: float | None = Field(serialization_alias="numberValue")
+
+
+class FeedbackSubmissionResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: UUID
+    source: str
+    temporary_alias: str | None = Field(serialization_alias="temporaryAlias")
+    status: str
+    revision: int
+    recorded_by_account_id: UUID = Field(serialization_alias="recordedByAccountId")
+    recorded_by_email: str = Field(serialization_alias="recordedByEmail")
+    updated_at: str = Field(serialization_alias="updatedAt")
+    answers: list[FeedbackAnswerResponseData]
+
+
 class ParticipantResponseData(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -185,6 +229,12 @@ class ParticipantSessionResponseData(BaseModel):
     materials: list[MaterialResponseData]
     latest_notification: NotificationResponseData = Field(
         serialization_alias="latestNotification"
+    )
+    feedback_items: list[FeedbackItemResponseData] = Field(
+        serialization_alias="feedbackItems"
+    )
+    own_feedback: FeedbackSubmissionResponseData | None = Field(
+        serialization_alias="ownFeedback"
     )
 
 
@@ -295,6 +345,65 @@ class ObservationRequest(BaseModel):
         return value
 
 
+class FeedbackItemRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    kind: str
+    question: str = Field(min_length=1, max_length=4_000)
+    options: list[str] = Field(default_factory=list, max_length=100)
+    expected_revision: int | None = Field(
+        default=None, gt=0, validation_alias="expectedRevision"
+    )
+
+
+class FeedbackAnswerRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    item_id: UUID = Field(validation_alias="itemId")
+    text_value: str | None = Field(
+        default=None, max_length=4_000, validation_alias="textValue"
+    )
+    option_id: UUID | None = Field(default=None, validation_alias="optionId")
+    number_value: float | None = Field(default=None, validation_alias="numberValue")
+
+
+class FeedbackSubmissionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    source: str
+    temporary_alias: str | None = Field(
+        default=None, max_length=160, validation_alias="temporaryAlias"
+    )
+    status: str = "submitted"
+    answers: list[FeedbackAnswerRequest] = Field(min_length=1, max_length=100)
+    expected_revision: int | None = Field(
+        default=None, gt=0, validation_alias="expectedRevision"
+    )
+
+
+class DirectFeedbackRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    status: str
+    answers: list[FeedbackAnswerRequest] = Field(min_length=1, max_length=100)
+    expected_revision: int | None = Field(
+        default=None, gt=0, validation_alias="expectedRevision"
+    )
+
+
+class FeedbackItemDeletedData(BaseModel):
+    id: UUID
+
+
+class ManagedFeedbackResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    session: SessionResponseData
+    actual_material_recorded: bool = Field(serialization_alias="actualMaterialRecorded")
+    items: list[FeedbackItemResponseData]
+    submissions: list[FeedbackSubmissionResponseData]
+
+
 class ActualParticipantResponseData(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -365,6 +474,22 @@ def _authenticated_account(
         ) from error
 
 
+def _required_idempotency_key(
+    value: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> str:
+    if value is None or re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value) is None:
+        raise api_error(422, "请求参数有误", "validation_failed")
+    return value
+
+
+def _optional_idempotency_key(
+    value: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+) -> str | None:
+    if value is not None and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", value) is None:
+        raise api_error(422, "请求参数有误", "validation_failed")
+    return value
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
@@ -428,6 +553,106 @@ def _observation_response(
         recorded_by_account_id=data.recorded_by_account_id,
         recorded_by_email=data.recorded_by_email,
         recorded_at=data.recorded_at.isoformat(),
+    )
+
+
+def _feedback_item_response(
+    data: evidence_service.FeedbackItemData,
+) -> FeedbackItemResponseData:
+    return FeedbackItemResponseData(
+        id=data.id,
+        kind=data.kind,
+        question=data.question,
+        revision=data.revision,
+        is_locked=data.is_locked,
+        options=[
+            FeedbackOptionResponseData(
+                id=option.id, label=option.label, position=option.position
+            )
+            for option in data.options
+        ],
+    )
+
+
+def _feedback_submission_response(
+    data: evidence_service.FeedbackSubmissionData,
+) -> FeedbackSubmissionResponseData:
+    return FeedbackSubmissionResponseData(
+        id=data.id,
+        source=data.source,
+        temporary_alias=data.temporary_alias,
+        status=data.status,
+        revision=data.revision,
+        recorded_by_account_id=data.recorded_by_account_id,
+        recorded_by_email=data.recorded_by_email,
+        updated_at=data.updated_at.isoformat(),
+        answers=[
+            FeedbackAnswerResponseData(
+                item_id=answer.item_id,
+                kind=answer.kind,
+                text_value=answer.text_value,
+                option_id=answer.option_id,
+                number_value=answer.number_value,
+            )
+            for answer in data.answers
+        ],
+    )
+
+
+def _feedback_response(
+    data: service.ManagedFeedbackData,
+) -> ManagedFeedbackResponseData:
+    return ManagedFeedbackResponseData(
+        session=_session_response(data.session),
+        actual_material_recorded=data.actual_material_recorded,
+        items=[_feedback_item_response(item) for item in data.feedback.items],
+        submissions=[
+            _feedback_submission_response(submission)
+            for submission in data.feedback.submissions
+        ],
+    )
+
+
+def _feedback_answer_draft(
+    data: FeedbackAnswerRequest,
+) -> evidence_service.FeedbackAnswerDraft:
+    return evidence_service.FeedbackAnswerDraft(
+        item_id=data.item_id,
+        text_value=data.text_value,
+        option_id=data.option_id,
+        number_value=data.number_value,
+    )
+
+
+def _feedback_submission_draft(
+    data: FeedbackSubmissionRequest,
+) -> evidence_service.FeedbackSubmissionDraft:
+    return evidence_service.FeedbackSubmissionDraft(
+        source=data.source,
+        temporary_alias=data.temporary_alias,
+        status=data.status,
+        answers=tuple(_feedback_answer_draft(answer) for answer in data.answers),
+    )
+
+
+def _direct_feedback_draft(
+    data: DirectFeedbackRequest,
+) -> evidence_service.FeedbackSubmissionDraft:
+    return evidence_service.FeedbackSubmissionDraft(
+        source="direct",
+        temporary_alias=None,
+        status=data.status,
+        answers=tuple(_feedback_answer_draft(answer) for answer in data.answers),
+    )
+
+
+def _feedback_item_draft(
+    data: FeedbackItemRequest,
+) -> evidence_service.FeedbackItemDraft:
+    return evidence_service.FeedbackItemDraft(
+        kind=data.kind,
+        question=data.question,
+        options=tuple(data.options),
     )
 
 
@@ -575,6 +800,60 @@ def _playtest_error(error: Exception) -> None:
             503,
             "当前操作暂时无法完成，请重试。",
             "playtest_operation_retryable",
+            {"Retry-After": "1"},
+        ) from error
+    raise error
+
+
+def _feedback_error(error: Exception) -> None:
+    if isinstance(
+        error,
+        (
+            service.PlaytestUnavailable,
+            evidence_service.FeedbackItemUnavailable,
+            evidence_service.FeedbackSubmissionUnavailable,
+        ),
+    ):
+        raise api_error(404, "反馈内容不可用", "feedback_unavailable") from error
+    if isinstance(error, service.PlaytestManagementForbidden):
+        raise api_error(
+            403,
+            "当前会话不能管理该场反馈",
+            "feedback_management_forbidden",
+        ) from error
+    if isinstance(error, evidence_service.FeedbackSubmissionForbidden):
+        raise api_error(
+            403, "当前会话不能更正该条整理", "feedback_submission_forbidden"
+        ) from error
+    if isinstance(error, service.PlaytestSessionStateInvalid):
+        raise api_error(
+            409, "当前场次状态不允许此操作", "feedback_session_state_invalid"
+        ) from error
+    if isinstance(error, evidence_service.FeedbackItemLocked):
+        raise api_error(
+            409, "已有反馈，不能修改题目", "feedback_item_locked"
+        ) from error
+    if isinstance(error, evidence_service.FeedbackItemRevisionConflict):
+        raise api_error(
+            409, "题目已被更新，请重新加载后核对", "feedback_item_revision_conflict"
+        ) from error
+    if isinstance(error, evidence_service.FeedbackSubmissionRevisionConflict):
+        raise api_error(
+            409,
+            "反馈已被更新，请重新加载后核对",
+            "feedback_submission_revision_conflict",
+        ) from error
+    if isinstance(error, evidence_service.FeedbackOperationConflict):
+        raise api_error(
+            409, "此操作已用于另一条反馈", "feedback_operation_conflict"
+        ) from error
+    if isinstance(error, evidence_service.FeedbackInvalid):
+        raise api_error(422, "反馈内容有误", "feedback_invalid") from error
+    if isinstance(error, service.PlaytestOperationRetryable):
+        raise api_error(
+            503,
+            "当前操作暂时无法完成，请重试。",
+            "feedback_operation_retryable",
             {"Retry-After": "1"},
         ) from error
     raise error
@@ -943,6 +1222,226 @@ def update_observation(
 
 
 @router.get(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-sessions/{session_id}/feedback",
+    response_model=ApiResponse[ManagedFeedbackResponseData],
+    summary="读取并整理场次反馈",
+)
+def read_feedback(
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[ManagedFeedbackResponseData]:
+    try:
+        feedback = service.read_feedback(
+            session, account.id, workspace_id, work_id, session_id
+        )
+    except Exception as error:
+        _feedback_error(error)
+        raise
+    return ApiResponse(
+        code=200, message="场次反馈已加载", data=_feedback_response(feedback)
+    )
+
+
+@router.post(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-sessions/{session_id}/feedback/items",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ApiResponse[FeedbackItemResponseData],
+    summary="新增场次反馈题",
+)
+def create_feedback_item(
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    request: FeedbackItemRequest,
+    operation_key: Annotated[str, Depends(_required_idempotency_key)],
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[FeedbackItemResponseData]:
+    try:
+        item = service.create_feedback_item(
+            session,
+            account.id,
+            workspace_id,
+            work_id,
+            session_id,
+            operation_key,
+            _feedback_item_draft(request),
+        )
+    except Exception as error:
+        _feedback_error(error)
+        raise
+    return ApiResponse(
+        code=201, message="反馈题已保存", data=_feedback_item_response(item)
+    )
+
+
+@router.patch(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-sessions/{session_id}/feedback/items/{item_id}",
+    response_model=ApiResponse[FeedbackItemResponseData],
+    summary="更正场次反馈题",
+)
+def update_feedback_item(
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    item_id: UUID,
+    request: FeedbackItemRequest,
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[FeedbackItemResponseData]:
+    if request.expected_revision is None:
+        raise api_error(422, "请求参数有误", "validation_failed")
+    try:
+        item = service.update_feedback_item(
+            session,
+            account.id,
+            workspace_id,
+            work_id,
+            session_id,
+            item_id,
+            request.expected_revision,
+            _feedback_item_draft(request),
+        )
+    except Exception as error:
+        _feedback_error(error)
+        raise
+    return ApiResponse(
+        code=200, message="反馈题已更正", data=_feedback_item_response(item)
+    )
+
+
+@router.delete(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-sessions/{session_id}/feedback/items/{item_id}",
+    response_model=ApiResponse[FeedbackItemDeletedData],
+    summary="移除场次反馈题",
+)
+def delete_feedback_item(
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    item_id: UUID,
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[FeedbackItemDeletedData]:
+    try:
+        service.delete_feedback_item(
+            session, account.id, workspace_id, work_id, session_id, item_id
+        )
+    except Exception as error:
+        _feedback_error(error)
+        raise
+    return ApiResponse(
+        code=200, message="反馈题已移除", data=FeedbackItemDeletedData(id=item_id)
+    )
+
+
+@router.post(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-sessions/{session_id}/feedback/submissions",
+    status_code=status.HTTP_201_CREATED,
+    response_model=ApiResponse[FeedbackSubmissionResponseData],
+    summary="新增组织者整理反馈",
+)
+def create_feedback_submission(
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    request: FeedbackSubmissionRequest,
+    operation_key: Annotated[str, Depends(_required_idempotency_key)],
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[FeedbackSubmissionResponseData]:
+    try:
+        submission = service.create_feedback_submission(
+            session,
+            account.id,
+            workspace_id,
+            work_id,
+            session_id,
+            operation_key,
+            _feedback_submission_draft(request),
+        )
+    except Exception as error:
+        _feedback_error(error)
+        raise
+    return ApiResponse(
+        code=201,
+        message="组织者整理已保存",
+        data=_feedback_submission_response(submission),
+    )
+
+
+@router.patch(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-sessions/{session_id}/feedback/submissions/{submission_id}",
+    response_model=ApiResponse[FeedbackSubmissionResponseData],
+    summary="更正组织者整理反馈",
+)
+def update_feedback_submission(
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    submission_id: UUID,
+    request: FeedbackSubmissionRequest,
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[FeedbackSubmissionResponseData]:
+    if request.expected_revision is None:
+        raise api_error(422, "请求参数有误", "validation_failed")
+    try:
+        submission = service.update_feedback_submission(
+            session,
+            account.id,
+            workspace_id,
+            work_id,
+            session_id,
+            submission_id,
+            request.expected_revision,
+            _feedback_submission_draft(request),
+        )
+    except Exception as error:
+        _feedback_error(error)
+        raise
+    return ApiResponse(
+        code=200,
+        message="组织者整理已更正",
+        data=_feedback_submission_response(submission),
+    )
+
+
+@router.put(
+    "/playtest-sessions/{session_id}/feedback/mine",
+    response_model=ApiResponse[FeedbackSubmissionResponseData],
+    summary="保存本人场次反馈",
+)
+def save_participant_feedback(
+    session_id: UUID,
+    request: DirectFeedbackRequest,
+    operation_key: Annotated[str | None, Depends(_optional_idempotency_key)],
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[FeedbackSubmissionResponseData]:
+    try:
+        submission = service.save_participant_feedback(
+            session,
+            account.id,
+            session_id,
+            operation_key,
+            request.expected_revision,
+            _direct_feedback_draft(request),
+        )
+    except Exception as error:
+        _feedback_error(error)
+        raise
+    return ApiResponse(
+        code=200,
+        message="我的反馈已保存",
+        data=_feedback_submission_response(submission),
+    )
+
+
+@router.get(
     "/playtest-sessions/{session_id}",
     response_model=ApiResponse[ParticipantSessionResponseData],
     summary="读取受邀试玩场次",
@@ -976,6 +1475,14 @@ def read_participant_session(
             rule_content=data.rule_content,
             materials=[_material_response(item) for item in data.materials],
             latest_notification=_notification_response(data.latest_notification),
+            feedback_items=[
+                _feedback_item_response(item) for item in data.feedback_items
+            ],
+            own_feedback=(
+                _feedback_submission_response(data.own_feedback)
+                if data.own_feedback is not None
+                else None
+            ),
         ),
     )
 

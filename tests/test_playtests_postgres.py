@@ -11,6 +11,7 @@ from sqlalchemy import select, text, update
 from app.access.context import set_actor, set_workspace_management_scope
 from app.core.config import settings
 from app.core.database import SessionLocal
+from app.evidence import service as evidence_service
 from app.evidence.models import PlaytestObservation
 from app.files import service as files_service
 from app.identity.models import Account
@@ -607,3 +608,208 @@ def test_suppression_stops_claimed_business_mail_before_smtp() -> None:
             suppress_business_mails(cancellation_session, scope)
             cancellation_session.commit()
         assert not dispatcher._start_smtp(dispatch_session, claim)
+
+
+def test_feedback_keeps_drafts_private_locks_items_and_updates_current_answers(
+    prepared_playtest: tuple[object, ...],
+) -> None:
+    (
+        owner,
+        organizer,
+        guest,
+        contender,
+        _,
+        workspace,
+        work,
+        _,
+        _,
+        _,
+        session_id,
+        _,
+    ) = prepared_playtest
+
+    with SessionLocal() as session:
+        short_text = playtests_service.create_feedback_item(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            "feedback-short-text",
+            evidence_service.FeedbackItemDraft(
+                kind="short_text", question="哪条规则还需要说明？", options=()
+            ),
+        )
+        choice = playtests_service.create_feedback_item(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            "feedback-choice",
+            evidence_service.FeedbackItemDraft(
+                kind="single_choice",
+                question="协作节奏如何？",
+                options=("过慢", "合适", "过快"),
+            ),
+        )
+        started = playtests_service.start_session(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            playtests_service.read_managed_session(
+                session, organizer, workspace, work.id, session_id
+            ).revision,
+        )
+        draft = playtests_service.save_participant_feedback(
+            session,
+            guest,
+            session_id,
+            "feedback-direct-create",
+            None,
+            evidence_service.FeedbackSubmissionDraft(
+                source="direct",
+                temporary_alias=None,
+                status="draft",
+                answers=(
+                    evidence_service.FeedbackAnswerDraft(
+                        item_id=short_text.id, text_value="终局结算希望有示例。"
+                    ),
+                ),
+            ),
+        )
+        retry = playtests_service.save_participant_feedback(
+            session,
+            guest,
+            session_id,
+            "feedback-direct-create",
+            None,
+            evidence_service.FeedbackSubmissionDraft(
+                source="direct",
+                temporary_alias=None,
+                status="draft",
+                answers=(
+                    evidence_service.FeedbackAnswerDraft(
+                        item_id=short_text.id, text_value="终局结算希望有示例。"
+                    ),
+                ),
+            ),
+        )
+        assert retry.id == draft.id
+        with pytest.raises(evidence_service.FeedbackItemLocked):
+            playtests_service.update_feedback_item(
+                session,
+                organizer,
+                workspace,
+                work.id,
+                session_id,
+                short_text.id,
+                short_text.revision,
+                evidence_service.FeedbackItemDraft(
+                    kind="short_text", question="已改变的问题", options=()
+                ),
+            )
+        session.rollback()
+
+        manager_view = playtests_service.read_feedback(
+            session, organizer, workspace, work.id, session_id
+        )
+        assert manager_view.feedback.submissions == ()
+        participant_view = playtests_service.read_participant_session(
+            session, guest, session_id
+        )
+        assert participant_view.own_feedback is not None
+        assert participant_view.own_feedback.status == "draft"
+        other_participant = playtests_service.read_participant_session(
+            session, contender, session_id
+        )
+        assert other_participant.own_feedback is None
+
+        submitted = playtests_service.save_participant_feedback(
+            session,
+            guest,
+            session_id,
+            None,
+            draft.revision,
+            evidence_service.FeedbackSubmissionDraft(
+                source="direct",
+                temporary_alias=None,
+                status="submitted",
+                answers=(
+                    evidence_service.FeedbackAnswerDraft(
+                        item_id=choice.id, option_id=choice.options[1].id
+                    ),
+                ),
+            ),
+        )
+        assert submitted.id == draft.id
+        assert submitted.revision == draft.revision + 1
+        assert submitted.answers[0].item_id == choice.id
+        with pytest.raises(evidence_service.FeedbackSubmissionRevisionConflict):
+            playtests_service.save_participant_feedback(
+                session,
+                guest,
+                session_id,
+                None,
+                draft.revision,
+                evidence_service.FeedbackSubmissionDraft(
+                    source="direct",
+                    temporary_alias=None,
+                    status="submitted",
+                    answers=(
+                        evidence_service.FeedbackAnswerDraft(
+                            item_id=choice.id, option_id=choice.options[0].id
+                        ),
+                    ),
+                ),
+            )
+        session.rollback()
+
+        manager_view = playtests_service.read_feedback(
+            session, organizer, workspace, work.id, session_id
+        )
+        assert [submission.id for submission in manager_view.feedback.submissions] == [
+            draft.id
+        ]
+        organizer_submission = playtests_service.create_feedback_submission(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            "feedback-organizer-create",
+            evidence_service.FeedbackSubmissionDraft(
+                source="temporary_alias",
+                temporary_alias="现场观察者 A",
+                status="submitted",
+                answers=(
+                    evidence_service.FeedbackAnswerDraft(
+                        item_id=short_text.id, text_value="口头复盘提到结算例子不足。"
+                    ),
+                ),
+            ),
+        )
+        with pytest.raises(evidence_service.FeedbackSubmissionForbidden):
+            playtests_service.update_feedback_submission(
+                session,
+                owner,
+                workspace,
+                work.id,
+                session_id,
+                organizer_submission.id,
+                organizer_submission.revision,
+                evidence_service.FeedbackSubmissionDraft(
+                    source="oral_discussion",
+                    temporary_alias=None,
+                    status="submitted",
+                    answers=(
+                        evidence_service.FeedbackAnswerDraft(
+                            item_id=short_text.id, text_value="无权更正。"
+                        ),
+                    ),
+                ),
+            )
+        session.rollback()
+        assert started.status == "started"

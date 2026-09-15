@@ -8,6 +8,8 @@ from sqlalchemy.orm import Session
 
 from app.access.context import (
     set_actor,
+    set_feedback_management_scope,
+    set_feedback_participant_scope,
     set_file_lifecycle_scope,
     set_playtest_management_scope,
     set_playtest_participant_lookup_scope,
@@ -165,6 +167,15 @@ class ParticipantSessionData:
     rule_content: str
     materials: tuple[MaterialData, ...]
     latest_notification: NotificationData
+    feedback_items: tuple[evidence_service.FeedbackItemData, ...]
+    own_feedback: evidence_service.FeedbackSubmissionData | None
+
+
+@dataclass(frozen=True)
+class ManagedFeedbackData:
+    session: SessionData
+    actual_material_recorded: bool
+    feedback: evidence_service.FeedbackData
 
 
 @dataclass(frozen=True)
@@ -1451,6 +1462,10 @@ def read_participant_session(
             session, actor_id, session_id, lock=False
         )
         set_playtest_session_scope(session, item.id)
+        feedback = None
+        if item.status != CANCELLED:
+            set_feedback_participant_scope(session, item.id)
+            feedback = evidence_service.list_feedback(session, item.id)
         return ParticipantSessionData(
             id=item.id,
             work_name=item.work_name,
@@ -1467,6 +1482,10 @@ def read_participant_session(
             rule_content=item.rule_content,
             materials=_materials(session, item.id) if item.status != CANCELLED else (),
             latest_notification=_mail_data(session, participant.latest_outbox_id),
+            feedback_items=feedback.items if feedback is not None else (),
+            own_feedback=(
+                feedback.submissions[0] if feedback and feedback.submissions else None
+            ),
         )
     except PlaytestUnavailable:
         raise
@@ -1547,3 +1566,269 @@ def open_participant_material(
         session.rollback()
         raise PlaytestOperationRetryable from error
     return stream
+
+
+def _feedback_managed_session(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    *,
+    lock: bool,
+) -> PlaytestSession:
+    _require_management(session, actor_id, workspace_id, work_id)
+    item = _load_managed_session(session, workspace_id, work_id, session_id, lock=lock)
+    if item.status == CANCELLED:
+        session.rollback()
+        raise PlaytestUnavailable
+    set_feedback_management_scope(session, item.id)
+    return item
+
+
+def _feedback_data(session: Session, item: PlaytestSession) -> ManagedFeedbackData:
+    set_feedback_management_scope(session, item.id)
+    return ManagedFeedbackData(
+        session=_session_data(session, item, include_participants=True),
+        actual_material_recorded=item.actual_material_recorded,
+        feedback=evidence_service.list_feedback(session, item.id),
+    )
+
+
+def read_feedback(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+) -> ManagedFeedbackData:
+    try:
+        item = _feedback_managed_session(
+            session, actor_id, workspace_id, work_id, session_id, lock=False
+        )
+        return _feedback_data(session, item)
+    except (
+        PlaytestManagementForbidden,
+        PlaytestUnavailable,
+        PlaytestOperationRetryable,
+    ):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+
+
+def _require_feedback_mutable(item: PlaytestSession, session: Session) -> None:
+    if item.status not in {SCHEDULED, STARTED}:
+        session.rollback()
+        raise PlaytestSessionStateInvalid
+
+
+def create_feedback_item(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    operation_key: str,
+    draft: evidence_service.FeedbackItemDraft,
+) -> evidence_service.FeedbackItemData:
+    try:
+        item = _feedback_managed_session(
+            session, actor_id, workspace_id, work_id, session_id, lock=True
+        )
+        _require_feedback_mutable(item, session)
+        result = evidence_service.create_feedback_item(
+            session, item.id, operation_key, draft
+        )
+        _commit_or_rollback(session)
+        return result
+    except (
+        evidence_service.FeedbackInvalid,
+        evidence_service.FeedbackOperationConflict,
+        PlaytestManagementForbidden,
+        PlaytestSessionStateInvalid,
+        PlaytestUnavailable,
+    ):
+        session.rollback()
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+
+
+def update_feedback_item(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    item_id: UUID,
+    expected_revision: int,
+    draft: evidence_service.FeedbackItemDraft,
+) -> evidence_service.FeedbackItemData:
+    try:
+        item = _feedback_managed_session(
+            session, actor_id, workspace_id, work_id, session_id, lock=True
+        )
+        _require_feedback_mutable(item, session)
+        result = evidence_service.update_feedback_item(
+            session, item.id, item_id, expected_revision, draft
+        )
+        _commit_or_rollback(session)
+        return result
+    except (
+        evidence_service.FeedbackInvalid,
+        evidence_service.FeedbackItemLocked,
+        evidence_service.FeedbackItemRevisionConflict,
+        evidence_service.FeedbackItemUnavailable,
+        PlaytestManagementForbidden,
+        PlaytestSessionStateInvalid,
+        PlaytestUnavailable,
+    ):
+        session.rollback()
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+
+
+def delete_feedback_item(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    item_id: UUID,
+) -> None:
+    try:
+        item = _feedback_managed_session(
+            session, actor_id, workspace_id, work_id, session_id, lock=True
+        )
+        _require_feedback_mutable(item, session)
+        evidence_service.delete_feedback_item(session, item.id, item_id)
+        _commit_or_rollback(session)
+    except (
+        evidence_service.FeedbackItemLocked,
+        evidence_service.FeedbackItemUnavailable,
+        PlaytestManagementForbidden,
+        PlaytestSessionStateInvalid,
+        PlaytestUnavailable,
+    ):
+        session.rollback()
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+
+
+def create_feedback_submission(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    operation_key: str,
+    draft: evidence_service.FeedbackSubmissionDraft,
+) -> evidence_service.FeedbackSubmissionData:
+    try:
+        item = _feedback_managed_session(
+            session, actor_id, workspace_id, work_id, session_id, lock=True
+        )
+        _require_feedback_mutable(item, session)
+        result = evidence_service.create_organizer_submission(
+            session, item.id, actor_id, operation_key, draft
+        )
+        _commit_or_rollback(session)
+        return result
+    except (
+        evidence_service.FeedbackInvalid,
+        evidence_service.FeedbackOperationConflict,
+        PlaytestManagementForbidden,
+        PlaytestSessionStateInvalid,
+        PlaytestUnavailable,
+    ):
+        session.rollback()
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+
+
+def update_feedback_submission(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    session_id: UUID,
+    submission_id: UUID,
+    expected_revision: int,
+    draft: evidence_service.FeedbackSubmissionDraft,
+) -> evidence_service.FeedbackSubmissionData:
+    try:
+        item = _feedback_managed_session(
+            session, actor_id, workspace_id, work_id, session_id, lock=True
+        )
+        _require_feedback_mutable(item, session)
+        result = evidence_service.update_organizer_submission(
+            session,
+            item.id,
+            submission_id,
+            actor_id,
+            expected_revision,
+            draft,
+        )
+        _commit_or_rollback(session)
+        return result
+    except (
+        evidence_service.FeedbackInvalid,
+        evidence_service.FeedbackSubmissionForbidden,
+        evidence_service.FeedbackSubmissionRevisionConflict,
+        evidence_service.FeedbackSubmissionUnavailable,
+        PlaytestManagementForbidden,
+        PlaytestSessionStateInvalid,
+        PlaytestUnavailable,
+    ):
+        session.rollback()
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+
+
+def save_participant_feedback(
+    session: Session,
+    actor_id: UUID,
+    session_id: UUID,
+    operation_key: str | None,
+    expected_revision: int | None,
+    draft: evidence_service.FeedbackSubmissionDraft,
+) -> evidence_service.FeedbackSubmissionData:
+    try:
+        _, item = _participant_session(session, actor_id, session_id, lock=True)
+        if item.status != STARTED:
+            session.rollback()
+            raise PlaytestSessionStateInvalid
+        set_feedback_participant_scope(session, item.id)
+        result = evidence_service.save_direct_submission(
+            session,
+            item.id,
+            actor_id,
+            operation_key,
+            expected_revision,
+            draft,
+        )
+        _commit_or_rollback(session)
+        return result
+    except (
+        evidence_service.FeedbackInvalid,
+        evidence_service.FeedbackOperationConflict,
+        evidence_service.FeedbackSubmissionRevisionConflict,
+        PlaytestSessionStateInvalid,
+        PlaytestUnavailable,
+    ):
+        session.rollback()
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error

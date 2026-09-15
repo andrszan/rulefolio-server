@@ -4,6 +4,7 @@ from uuid import uuid4
 import pytest
 from fastapi.testclient import TestClient
 
+from app.evidence import service as evidence_service
 from app.identity import service as identity_service
 from app.identity.models import Account, SessionRecord
 from app.main import app
@@ -184,3 +185,76 @@ def test_playtest_mail_links_only_to_the_protected_session() -> None:
     assert subject == "你受邀参加试玩场次"
     assert f"/playtest-sessions/{session_id}" in body
     assert "规则" not in body
+
+
+def test_feedback_management_forbidden_uses_stable_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = Account(id=uuid4(), email="collaborator@example.com", status="active")
+    _authorize(monkeypatch, account)
+    monkeypatch.setattr(
+        service,
+        "read_feedback",
+        lambda *_: (_ for _ in ()).throw(service.PlaytestManagementForbidden),
+    )
+    workspace_id, work_id, session_id = uuid4(), uuid4(), uuid4()
+
+    with TestClient(app) as client:
+        response = client.get(
+            f"/api/v1/workspaces/{workspace_id}/works/{work_id}/playtest-sessions/{session_id}/feedback",
+            headers={"Authorization": "Bearer session-token"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["data"] == {"reason": "feedback_management_forbidden"}
+
+
+def test_feedback_submission_response_includes_current_recorder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = Account(id=uuid4(), email="organizer@example.com", status="active")
+    _authorize(monkeypatch, account)
+    submission = evidence_service.FeedbackSubmissionData(
+        id=uuid4(),
+        source="oral_discussion",
+        temporary_alias=None,
+        status="submitted",
+        revision=1,
+        recorded_by_account_id=account.id,
+        recorded_by_email=account.email,
+        updated_at=datetime.now(UTC),
+        answers=(),
+    )
+    monkeypatch.setattr(service, "create_feedback_submission", lambda *_: submission)
+    workspace_id, work_id, session_id = uuid4(), uuid4(), uuid4()
+
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/v1/workspaces/{workspace_id}/works/{work_id}/playtest-sessions/{session_id}/feedback/submissions",
+            headers={
+                "Authorization": "Bearer session-token",
+                "Idempotency-Key": "feedback-create",
+            },
+            json={
+                "source": "oral_discussion",
+                "temporaryAlias": None,
+                "answers": [{"itemId": str(uuid4()), "textValue": "记录内容"}],
+            },
+        )
+
+    assert response.status_code == 201
+    assert response.json()["data"]["recordedByAccountId"] == str(account.id)
+
+
+def test_openapi_includes_feedback_contract() -> None:
+    with TestClient(app) as client:
+        schema = client.get("/api/v1/openapi.json").json()
+
+    item = schema["components"]["schemas"]["FeedbackItemResponseData"]
+    direct = schema["components"]["schemas"]["DirectFeedbackRequest"]
+    participant = schema["components"]["schemas"]["ParticipantSessionResponseData"]
+    submission = schema["components"]["schemas"]["FeedbackSubmissionResponseData"]
+    assert "isLocked" in item["properties"]
+    assert "expectedRevision" in direct["properties"]
+    assert "feedbackItems" in participant["properties"]
+    assert "recordedByAccountId" in submission["properties"]
