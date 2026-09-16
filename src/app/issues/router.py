@@ -42,6 +42,7 @@ class IssueUpdateRequest(BaseModel):
     description: str
     decision: str
     reason: str
+    adjustment_note: str | None = Field(default=None, validation_alias="adjustmentNote")
     status: str
     expected_revision: int = Field(validation_alias="expectedRevision")
 
@@ -53,6 +54,15 @@ class IssueEvidenceAddRequest(IssueEvidenceReferenceRequest):
 class IssueRevisionRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    expected_revision: int = Field(validation_alias="expectedRevision")
+
+
+class IssueRetestConclusionRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    conclusion: str
+    reason: str
+    status: str
     expected_revision: int = Field(validation_alias="expectedRevision")
 
 
@@ -96,6 +106,14 @@ class IssueEvidenceResponseData(BaseModel):
     answers: list[IssueEvidenceAnswerResponseData]
 
 
+class IssueConclusionResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    retest_id: UUID = Field(serialization_alias="retestId")
+    conclusion: str
+    reason: str
+
+
 class IssueResponseData(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -103,11 +121,32 @@ class IssueResponseData(BaseModel):
     description: str
     decision: str
     reason: str
+    adjustment_note: str | None = Field(serialization_alias="adjustmentNote")
+    verification_status: str = Field(serialization_alias="verificationStatus")
+    current_conclusion: IssueConclusionResponseData | None = Field(
+        serialization_alias="currentConclusion"
+    )
     status: str
     revision: int
     created_at: str = Field(serialization_alias="createdAt")
     updated_at: str = Field(serialization_alias="updatedAt")
     source_count: int = Field(serialization_alias="sourceCount")
+
+
+class IssueRetestResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: UUID
+    plan_id: UUID = Field(serialization_alias="planId")
+    session_id: UUID = Field(serialization_alias="sessionId")
+    scheduled_at: str = Field(serialization_alias="scheduledAt")
+    location: str
+    status: str
+    rule_name: str = Field(serialization_alias="ruleName")
+    actual_material_recorded: bool = Field(serialization_alias="actualMaterialRecorded")
+    current_adjustment: bool = Field(serialization_alias="currentAdjustment")
+    conclusion: str | None
+    conclusion_reason: str | None = Field(serialization_alias="conclusionReason")
 
 
 def _authenticated_account(
@@ -152,11 +191,38 @@ def _issue_response(data: service.IssueData) -> IssueResponseData:
         description=data.description,
         decision=data.decision,
         reason=data.reason,
+        adjustment_note=data.adjustment_note,
+        verification_status=data.verification_status,
+        current_conclusion=(
+            IssueConclusionResponseData(
+                retest_id=data.current_conclusion.retest_id,
+                conclusion=data.current_conclusion.conclusion,
+                reason=data.current_conclusion.reason,
+            )
+            if data.current_conclusion is not None
+            else None
+        ),
         status=data.status,
         revision=data.revision,
         created_at=data.created_at.isoformat(),
         updated_at=data.updated_at.isoformat(),
         source_count=data.source_count,
+    )
+
+
+def _issue_retest_response(data: service.IssueRetestData) -> IssueRetestResponseData:
+    return IssueRetestResponseData(
+        id=data.id,
+        plan_id=data.plan_id,
+        session_id=data.session_id,
+        scheduled_at=data.scheduled_at.isoformat(),
+        location=data.location,
+        status=data.status,
+        rule_name=data.rule_name,
+        actual_material_recorded=data.actual_material_recorded,
+        current_adjustment=data.current_adjustment,
+        conclusion=data.conclusion,
+        conclusion_reason=data.conclusion_reason,
     )
 
 
@@ -216,6 +282,18 @@ def _issue_error(error: Exception) -> None:
             409,
             "问题已被更新，请重新加载后核对",
             "issue_revision_conflict",
+        ) from error
+    if isinstance(error, service.IssueRetestResultRequired):
+        raise api_error(
+            409,
+            "请先开始该复测场次并保存实际材料，再记录结论。",
+            "issue_retest_result_required",
+        ) from error
+    if isinstance(error, service.IssueRetestEvidenceRequired):
+        raise api_error(
+            409,
+            "请先关联该复测场次的现场观察或已提交反馈，再记录结论。",
+            "issue_retest_evidence_required",
         ) from error
     if isinstance(error, service.IssueOperationConflict):
         raise api_error(
@@ -346,6 +424,7 @@ def update_issue(
             description=request.description,
             decision=request.decision,
             reason=request.reason,
+            adjustment_note=request.adjustment_note,
             status=request.status,
             expected_revision=request.expected_revision,
         )
@@ -353,6 +432,77 @@ def update_issue(
         _issue_error(error)
         raise
     return ApiResponse(code=200, message="问题已更新", data=_issue_response(issue))
+
+
+@router.get(
+    "/workspaces/{workspace_id}/works/{work_id}/issues/{issue_id}/retests",
+    response_model=ApiResponse[Page[IssueRetestResponseData]],
+    summary="列出问题关联复测场次",
+)
+def list_retests(
+    workspace_id: UUID,
+    work_id: UUID,
+    issue_id: UUID,
+    params: Annotated[PageParams, Depends()],
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[Page[IssueRetestResponseData]]:
+    try:
+        retests, total = service.list_retests(
+            session,
+            account.id,
+            workspace_id,
+            work_id,
+            issue_id,
+            params.page,
+            params.size,
+        )
+    except Exception as error:
+        _issue_error(error)
+        raise
+    return ApiResponse(
+        code=200,
+        message="关联复测场次已加载",
+        data=Page(
+            items=[_issue_retest_response(retest) for retest in retests],
+            page=params.page,
+            size=params.size,
+            total=total,
+        ),
+    )
+
+
+@router.patch(
+    "/workspaces/{workspace_id}/works/{work_id}/issues/{issue_id}/retests/{retest_id}/conclusion",
+    response_model=ApiResponse[IssueResponseData],
+    summary="记录问题当前结论",
+)
+def save_retest_conclusion(
+    workspace_id: UUID,
+    work_id: UUID,
+    issue_id: UUID,
+    retest_id: UUID,
+    request: IssueRetestConclusionRequest,
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[IssueResponseData]:
+    try:
+        issue = service.save_retest_conclusion(
+            session,
+            account.id,
+            workspace_id,
+            work_id,
+            issue_id,
+            retest_id,
+            conclusion=request.conclusion,
+            reason=request.reason,
+            status=request.status,
+            expected_revision=request.expected_revision,
+        )
+    except Exception as error:
+        _issue_error(error)
+        raise
+    return ApiResponse(code=200, message="当前结论已记录", data=_issue_response(issue))
 
 
 @router.get(

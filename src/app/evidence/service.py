@@ -191,6 +191,38 @@ def validate_issue_evidence_sources(
     return references
 
 
+def has_issue_evidence_from_session(
+    session: Session,
+    references: tuple[IssueEvidenceReference, ...],
+    session_id: UUID,
+) -> bool:
+    for reference in references:
+        if reference.source_type == "observation":
+            set_issue_evidence_candidate_observation_scope(session, reference.source_id)
+            source_id = session.scalar(
+                select(PlaytestObservation.id).where(
+                    PlaytestObservation.id == reference.source_id,
+                    PlaytestObservation.session_id == session_id,
+                )
+            )
+        elif reference.source_type == "feedback_submission":
+            set_issue_evidence_candidate_feedback_submission_scope(
+                session, reference.source_id
+            )
+            source_id = session.scalar(
+                select(PlaytestFeedbackSubmission.id).where(
+                    PlaytestFeedbackSubmission.id == reference.source_id,
+                    PlaytestFeedbackSubmission.session_id == session_id,
+                    PlaytestFeedbackSubmission.status == "submitted",
+                )
+            )
+        else:
+            raise IssueEvidenceInvalid
+        if source_id is not None:
+            return True
+    return False
+
+
 def _issue_feedback_answers(
     session: Session, submission_ids: set[UUID]
 ) -> dict[UUID, tuple[IssueEvidenceAnswerData, ...]]:

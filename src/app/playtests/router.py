@@ -53,6 +53,10 @@ class CreatePlanRequest(BaseModel):
         min_length=1, max_length=4_000, validation_alias="recordingMethod"
     )
     sessions: list[SessionRequest] = Field(min_length=1, max_length=100)
+    retest_issue_id: UUID | None = Field(default=None, validation_alias="retestIssueId")
+    retest_issue_expected_revision: int | None = Field(
+        default=None, validation_alias="retestIssueExpectedRevision"
+    )
 
     @field_validator("observation_goal", "recording_method")
     @classmethod
@@ -761,6 +765,16 @@ def _draft(data: SessionRequest) -> service.SessionDraft:
 
 
 def _playtest_error(error: Exception) -> None:
+    if isinstance(error, service.PlaytestRetestUnavailable):
+        raise api_error(404, "复测问题不可用", "issue_unavailable") from error
+    if isinstance(error, service.PlaytestRetestInvalid):
+        raise api_error(422, "复测请求有误", "issue_invalid") from error
+    if isinstance(error, service.PlaytestRetestRevisionConflict):
+        raise api_error(
+            409,
+            "问题已被更新，请重新加载后核对",
+            "issue_revision_conflict",
+        ) from error
     if isinstance(error, service.PlaytestUnavailable):
         raise api_error(404, "试玩场次不可用", "playtest_unavailable") from error
     if isinstance(error, service.PlaytestManagementForbidden):
@@ -909,6 +923,10 @@ def create_plan(
     account: Annotated[Account, Depends(_authenticated_account)],
     session: Session = Depends(get_db),
 ) -> ApiResponse[PlanResponseData]:
+    if (request.retest_issue_id is None) != (
+        request.retest_issue_expected_revision is None
+    ) or (request.retest_issue_id is not None and len(request.sessions) != 1):
+        raise api_error(422, "复测请求有误", "issue_invalid")
     try:
         plan = service.create_plan(
             session,
@@ -918,6 +936,8 @@ def create_plan(
             request.observation_goal,
             request.recording_method,
             tuple(_draft(item) for item in request.sessions),
+            retest_issue_id=request.retest_issue_id,
+            retest_issue_expected_revision=request.retest_issue_expected_revision,
         )
     except ValueError as error:
         raise api_error(422, "请求参数有误", "validation_failed") from error

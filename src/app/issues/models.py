@@ -12,6 +12,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
 from sqlalchemy.dialects.postgresql import UUID as PostgreSQLUUID
 from sqlalchemy.orm import Mapped, mapped_column
@@ -50,9 +51,58 @@ class Issue(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     decision: Mapped[str] = mapped_column(String(16), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
+    adjustment_note: Mapped[str | None] = mapped_column(Text)
+    adjustment_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     creation_operation_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class IssueRetestLink(Base):
+    __tablename__ = "issue_retest_links"
+    __table_args__ = (
+        CheckConstraint(
+            "(conclusion IS NULL AND conclusion_reason IS NULL) OR "
+            "(conclusion IN ('verified', 'continue_observing', 'adjust_again', "
+            "'insufficient_evidence') AND btrim(conclusion_reason) <> '')",
+            name="ck_issue_retest_link_conclusion",
+        ),
+        UniqueConstraint("issue_id", "session_id", name="uq_issue_retest_link_session"),
+        Index("ix_issue_retest_links_issue", "issue_id", "id"),
+        Index(
+            "uq_issue_retest_link_current_conclusion",
+            "issue_id",
+            unique=True,
+            postgresql_where=text("conclusion IS NOT NULL"),
+        ),
+    )
+
+    id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True), primary_key=True, default=uuid4
+    )
+    issue_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("issues.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    session_id: Mapped[UUID] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("playtest_sessions.id", ondelete="RESTRICT"),
+        nullable=False,
+    )
+    adjustment_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0
+    )
+    conclusion: Mapped[str | None] = mapped_column(String(32))
+    conclusion_reason: Mapped[str | None] = mapped_column(Text)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

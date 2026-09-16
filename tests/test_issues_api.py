@@ -80,6 +80,9 @@ def test_create_issue_returns_camel_case_summary_and_operation_conflict(
         description="终局结算需要示例。",
         decision="modify",
         reason="来源都指出理解障碍。",
+        adjustment_note="已补充终局结算示例。",
+        verification_status="pending",
+        current_conclusion=None,
         status="open",
         revision=1,
         created_at=now,
@@ -106,6 +109,8 @@ def test_create_issue_returns_camel_case_summary_and_operation_conflict(
 
     assert response.status_code == 201
     assert response.json()["data"]["sourceCount"] == 1
+    assert response.json()["data"]["adjustmentNote"] == "已补充终局结算示例。"
+    assert response.json()["data"]["verificationStatus"] == "pending"
     assert response.json()["data"]["createdAt"] == now.isoformat()
 
     monkeypatch.setattr(
@@ -169,9 +174,14 @@ def test_openapi_includes_issue_camel_case_contract() -> None:
     evidence_session = schema["components"]["schemas"][
         "IssueEvidenceSessionResponseData"
     ]
+    retest = schema["components"]["schemas"]["IssueRetestResponseData"]
     assert "sources" in create["properties"]
     assert "sourceType" in reference["properties"]
     assert "sourceCount" in response["properties"]
+    assert "adjustmentNote" in response["properties"]
+    assert "verificationStatus" in response["properties"]
+    assert "currentConclusion" in response["properties"]
     assert "linkId" in evidence["properties"]
     assert "sourceType" in evidence["properties"]
     assert "location" in evidence_session["properties"]
+    assert "currentAdjustment" in retest["properties"]

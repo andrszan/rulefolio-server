@@ -36,7 +36,7 @@ from app.identity.models import (
     SessionRecord,
 )
 from app.issues import service as issues_service
-from app.issues.models import Issue, IssueEvidenceLink
+from app.issues.models import Issue, IssueEvidenceLink, IssueRetestLink
 from app.notifications import dispatcher as mail_dispatcher
 from app.notifications.models import MailOutbox
 from app.playtests import service as playtests_service
@@ -171,6 +171,7 @@ def _record_count(session: Session) -> int:
         PlaytestFeedbackItem,
         PlaytestObservation,
         IssueEvidenceLink,
+        IssueRetestLink,
         Issue,
         StoredFile,
     )
@@ -198,7 +199,7 @@ def _baseline_counts() -> dict[str, int]:
         "accesses": 3,
         "images": 1,
         "materials": 2,
-        "playtest_plans": 1,
+        "playtest_plans": 2,
         "playtest_sessions": 2,
         "playtest_confirmations": 1,
         "playtest_actual_participants": 2,
@@ -206,8 +207,9 @@ def _baseline_counts() -> dict[str, int]:
         "playtest_feedback_items": 3,
         "playtest_feedback_submissions": 2,
         "playtest_feedback_answers": 4,
-        "issues": 3,
-        "issue_evidence_links": 5,
+        "issues": 4,
+        "issue_evidence_links": 7,
+        "issue_retest_links": 1,
     }
 
 
@@ -326,7 +328,7 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
                         "application/pdf",
                     )
                 )
-        works_service.update_rule_materials(
+        rule_materials = works_service.update_rule_materials(
             session,
             owner.id,
             workspace.id,
@@ -356,13 +358,6 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
                     location="工作室试玩桌 A",
                     capacity=4,
                     material_file_ids=tuple(material.id for material in materials),
-                    participant_emails=(playtester.email,),
-                ),
-                playtests_service.SessionDraft(
-                    scheduled_at=datetime.now(UTC) + timedelta(days=5),
-                    location="工作室试玩桌 B",
-                    capacity=4,
-                    material_file_ids=(materials[0].id,),
                     participant_emails=(playtester.email,),
                 ),
             ),
@@ -517,55 +512,8 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
             ),
         )
 
-        second_started = playtests_service.start_session(
-            session,
-            owner.id,
-            workspace.id,
-            work.id,
-            plan.sessions[1].id,
-            plan.sessions[1].revision,
-        )
-        second_result = playtests_service.save_result(
-            session,
-            owner.id,
-            workspace.id,
-            work.id,
-            second_started.id,
-            second_started.revision,
-            playtests_service.ResultDraft(
-                actual_headcount=None,
-                actual_duration_minutes=None,
-                completion_status="interrupted",
-                actual_material=playtests_service.ActualMaterialDraft(
-                    rule_name=second_started.rule_name,
-                    rule_description=second_started.rule_description,
-                    rule_content=second_started.rule_content,
-                    material_file_ids=(materials[1].id,),
-                    change_reason="现场改用打印辅助页进行口头讲解。",
-                ),
-                actual_participants=(
-                    playtests_service.ActualParticipantDraft(
-                        planned_account_id=None,
-                        temporary_code="临场观察者",
-                        seat_or_faction=None,
-                        score_or_outcome=None,
-                    ),
-                ),
-            ),
-        )
-        second_variant = playtests_service.create_observation(
-            session,
-            owner.id,
-            workspace.id,
-            work.id,
-            second_started.id,
-            second_result.session.revision,
-            "temporary_variant",
-            "因时间不足跳过终局结算，改为口头复盘。",
-        )
-
         phase = "issues"
-        issues_service.create_issue(
+        modify_issue = issues_service.create_issue(
             session,
             owner.id,
             workspace.id,
@@ -610,15 +558,177 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
             workspace.id,
             work.id,
             "baseline-issue-reject",
-            description="时间不足时跳过终局结算不作为当前规则问题。",
+            description="早期协作已经形成时不增加强制分工步骤。",
             decision="reject",
-            reason="该场采用临时变体，不能代表当前规则体验。",
+            reason="现有现场记录已经显示玩家会自主形成分工。",
             status="open",
             references=(
                 evidence_service.IssueEvidenceReference(
-                    source_type="observation", source_id=second_variant.observation.id
+                    source_type="observation", source_id=first_fact.observation.id
                 ),
             ),
+        )
+
+        works_service.update_rule_materials(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            rule_name="雾林棋局当前规则",
+            rule_description="补充终局结算示例后的当前规则与打印辅助页。",
+            rule_content=(
+                "两至四名玩家共同穿过雾林，在路径封闭前找到三枚线索并回到营地。"
+                "每回合选择探索、协助或记录；终局时先结算营地线索，再结算路径奖励。"
+            ),
+            material_file_ids=[material.id for material in materials],
+            expected_revision=rule_materials.revision,
+        )
+        adjusted_issue = issues_service.update_issue(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            modify_issue.id,
+            description=modify_issue.description,
+            decision=modify_issue.decision,
+            reason=modify_issue.reason,
+            adjustment_note="已在终局结算章节补充结算顺序与完整示例。",
+            status="open",
+            expected_revision=modify_issue.revision,
+        )
+        retest_plan = playtests_service.create_plan(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            "验证补充终局结算示例后，玩家能否按正确顺序完成结算。",
+            "记录终局结算时的提问、操作顺序和复盘反馈。",
+            (
+                playtests_service.SessionDraft(
+                    scheduled_at=datetime.now(UTC) + timedelta(days=5),
+                    location="工作室试玩桌 B",
+                    capacity=4,
+                    material_file_ids=tuple(material.id for material in materials),
+                    participant_emails=(playtester.email,),
+                ),
+            ),
+            retest_issue_id=adjusted_issue.id,
+            retest_issue_expected_revision=adjusted_issue.revision,
+        )
+        retest_started = playtests_service.start_session(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            retest_plan.sessions[0].id,
+            retest_plan.sessions[0].revision,
+        )
+        retest_result = playtests_service.save_result(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            retest_started.id,
+            retest_started.revision,
+            playtests_service.ResultDraft(
+                actual_headcount=1,
+                actual_duration_minutes=50,
+                completion_status="completed",
+                actual_material=playtests_service.ActualMaterialDraft(
+                    rule_name=retest_started.rule_name,
+                    rule_description=retest_started.rule_description,
+                    rule_content=retest_started.rule_content,
+                    material_file_ids=tuple(
+                        material.id for material in retest_started.materials
+                    ),
+                    change_reason=None,
+                ),
+                actual_participants=(
+                    playtests_service.ActualParticipantDraft(
+                        planned_account_id=playtester.id,
+                        temporary_code=None,
+                        seat_or_faction="记录员",
+                        score_or_outcome="完成结算",
+                    ),
+                ),
+            ),
+        )
+        retest_fact = playtests_service.create_observation(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            retest_started.id,
+            retest_result.session.revision,
+            "fact",
+            "玩家依据新增示例按营地线索和路径奖励的顺序完成结算。",
+        )
+        retest_issue = issues_service.read_issue(
+            session, owner.id, workspace.id, work.id, adjusted_issue.id
+        )
+        retest_issue = issues_service.add_issue_evidence(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            retest_issue.id,
+            retest_issue.revision,
+            evidence_service.IssueEvidenceReference(
+                source_type="observation", source_id=retest_fact.observation.id
+            ),
+        )
+        issues_service.save_retest_conclusion(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            retest_issue.id,
+            next(
+                retest.id
+                for retest in issues_service.list_retests(
+                    session,
+                    owner.id,
+                    workspace.id,
+                    work.id,
+                    retest_issue.id,
+                    1,
+                    20,
+                )[0]
+                if retest.session_id == retest_started.id
+            ),
+            conclusion="verified",
+            reason="本场现场观察显示新增示例支持玩家按正确顺序完成结算。",
+            status="closed",
+            expected_revision=retest_issue.revision,
+        )
+        pending_issue = issues_service.create_issue(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            "baseline-issue-pending",
+            description="协作提示的开局示例需要更清晰的行动顺序。",
+            decision="modify",
+            reason="组织者整理反馈提出需要更具体的开局说明。",
+            status="open",
+            references=(
+                evidence_service.IssueEvidenceReference(
+                    source_type="feedback_submission", source_id=organizer_feedback.id
+                ),
+            ),
+        )
+        issues_service.update_issue(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            pending_issue.id,
+            description=pending_issue.description,
+            decision=pending_issue.decision,
+            reason=pending_issue.reason,
+            adjustment_note="已将开局行动顺序补充到规则说明中。",
+            status="open",
+            expected_revision=pending_issue.revision,
         )
 
         phase = "audit"
@@ -646,6 +756,7 @@ def _clear_database(session: Session) -> int:
     set_project_baseline_scope(session)
     models = (
         IssueEvidenceLink,
+        IssueRetestLink,
         Issue,
         PlaytestFeedbackAnswer,
         PlaytestFeedbackSubmission,

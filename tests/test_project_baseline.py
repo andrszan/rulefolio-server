@@ -18,7 +18,7 @@ from app.files import storage
 from app.files.models import StoredFile
 from app.identity import service as identity_service
 from app.identity.models import Account, OneTimeCredential, SessionRecord
-from app.issues.models import Issue, IssueEvidenceLink
+from app.issues.models import Issue, IssueEvidenceLink, IssueRetestLink
 from app.notifications.models import MailOutbox
 from app.playtests.models import (
     PlaytestPlan,
@@ -75,31 +75,32 @@ def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID, tuple[UUID, ...]]:
         feedback_answers = list(session.scalars(select(PlaytestFeedbackAnswer)))
         issues = list(session.scalars(select(Issue)))
         issue_evidence_links = list(session.scalars(select(IssueEvidenceLink)))
+        issue_retest_links = list(session.scalars(select(IssueRetestLink)))
         assert [account.email for account in accounts] == sorted(
             account.email for account in BASELINE_ACCOUNTS
         )
-        assert len(workspaces) == len(works) == len(plans) == 1
+        assert len(workspaces) == len(works) == 1
+        assert len(plans) == 2
         assert len(accesses) == 3
         assert len(sessions) == 2
-        assert {item.completion_status for item in sessions} == {
-            "completed",
-            "interrupted",
-        }
-        assert sum(item.actual_headcount is None for item in sessions) == 1
+        assert {item.completion_status for item in sessions} == {"completed"}
+        assert {item.actual_headcount for item in sessions} == {1}
         assert len(participants) == 2
-        assert len(actual_materials) == 3
+        assert len(actual_materials) == 4
         assert len(actual_participants) == 2
+        assert len(observations) == 3
         assert {item.kind for item in observations} == {
             "fact",
             "organizer_interpretation",
-            "temporary_variant",
         }
         assert len(feedback_items) == 3
         assert len(feedback_submissions) == 2
         assert len(feedback_answers) == 4
         assert {issue.decision for issue in issues} == {"modify", "observe", "reject"}
         assert {issue.status for issue in issues} == {"open", "closed"}
-        assert len(issue_evidence_links) == 5
+        assert len(issue_evidence_links) == 7
+        assert len(issue_retest_links) == 1
+        assert issue_retest_links[0].conclusion == "verified"
         assert {submission.status for submission in feedback_submissions} == {
             "submitted"
         }

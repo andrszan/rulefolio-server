@@ -6,14 +6,22 @@ from sqlalchemy import func, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.access.context import set_actor
+from app.access.context import (
+    set_actor,
+    set_playtest_management_scope,
+    set_work_management_scope,
+)
 from app.evidence import service as evidence_service
-from app.issues.models import Issue, IssueEvidenceLink
+from app.issues.models import Issue, IssueEvidenceLink, IssueRetestLink
+from app.playtests.models import PlaytestSession
 from app.works import service as works_service
 from app.works.models import Work
 
 DECISIONS = frozenset({"modify", "observe", "reject"})
 STATUSES = frozenset({"open", "closed"})
+CONCLUSIONS = frozenset(
+    {"verified", "continue_observing", "adjust_again", "insufficient_evidence"}
+)
 
 
 class IssueUnavailable(Exception):
@@ -48,12 +56,45 @@ class IssueOperationRetryable(Exception):
     pass
 
 
+class IssueRetestResultRequired(Exception):
+    pass
+
+
+class IssueRetestEvidenceRequired(Exception):
+    pass
+
+
+@dataclass(frozen=True)
+class IssueConclusionData:
+    retest_id: UUID
+    conclusion: str
+    reason: str
+
+
+@dataclass(frozen=True)
+class IssueRetestData:
+    id: UUID
+    plan_id: UUID
+    session_id: UUID
+    scheduled_at: datetime
+    location: str
+    status: str
+    rule_name: str
+    actual_material_recorded: bool
+    current_adjustment: bool
+    conclusion: str | None
+    conclusion_reason: str | None
+
+
 @dataclass(frozen=True)
 class IssueData:
     id: UUID
     description: str
     decision: str
     reason: str
+    adjustment_note: str | None
+    verification_status: str
+    current_conclusion: IssueConclusionData | None
     status: str
     revision: int
     created_at: datetime
@@ -86,6 +127,17 @@ def _required_text(value: str, limit: int) -> str:
     if not value or len(value) > limit:
         raise IssueInvalid
     return value
+
+
+def _optional_text(value: str | None, limit: int) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise IssueInvalid
+    value = value.strip()
+    if len(value) > limit:
+        raise IssueInvalid
+    return value or None
 
 
 def _values(
@@ -167,17 +219,66 @@ def _source_count(session: Session, issue_id: UUID) -> int:
     )
 
 
-def _data(issue: Issue, source_count: int) -> IssueData:
+def _current_conclusion(session: Session, issue: Issue) -> IssueConclusionData | None:
+    set_work_management_scope(session, issue.work_id, issue.workspace_id)
+    link = session.scalar(
+        select(IssueRetestLink)
+        .where(
+            IssueRetestLink.issue_id == issue.id,
+            IssueRetestLink.adjustment_generation == issue.adjustment_generation,
+            IssueRetestLink.conclusion.is_not(None),
+        )
+        .order_by(IssueRetestLink.id)
+    )
+    if link is None:
+        return None
+    if link.conclusion_reason is None:
+        raise IssueUnavailable
+    return IssueConclusionData(
+        retest_id=link.id, conclusion=link.conclusion, reason=link.conclusion_reason
+    )
+
+
+def _data(session: Session, issue: Issue, source_count: int) -> IssueData:
+    current_conclusion = _current_conclusion(session, issue)
+    verification_status = (
+        current_conclusion.conclusion
+        if current_conclusion is not None
+        else "pending"
+        if issue.adjustment_note is not None
+        else "not_recorded"
+    )
     return IssueData(
         id=issue.id,
         description=issue.description,
         decision=issue.decision,
         reason=issue.reason,
+        adjustment_note=issue.adjustment_note,
+        verification_status=verification_status,
+        current_conclusion=current_conclusion,
         status=issue.status,
         revision=issue.revision,
         created_at=issue.created_at,
         updated_at=issue.updated_at,
         source_count=source_count,
+    )
+
+
+def _retest_data(
+    link: IssueRetestLink, item: PlaytestSession, adjustment_generation: int
+) -> IssueRetestData:
+    return IssueRetestData(
+        id=link.id,
+        plan_id=item.plan_id,
+        session_id=item.id,
+        scheduled_at=item.scheduled_at,
+        location=item.location,
+        status=item.status,
+        rule_name=item.rule_name,
+        actual_material_recorded=item.actual_material_recorded,
+        current_adjustment=link.adjustment_generation == adjustment_generation,
+        conclusion=link.conclusion,
+        conclusion_reason=link.conclusion_reason,
     )
 
 
@@ -255,7 +356,7 @@ def list_issues(
     except SQLAlchemyError as error:
         session.rollback()
         raise IssueOperationRetryable from error
-    return [_data(issue, source_count) for issue, source_count in rows], total
+    return [_data(session, issue, source_count) for issue, source_count in rows], total
 
 
 def create_issue(
@@ -296,7 +397,7 @@ def create_issue(
             ):
                 session.rollback()
                 raise IssueOperationConflict
-            return _data(existing, len(existing_references))
+            return _data(session, existing, len(existing_references))
         references = evidence_service.validate_issue_evidence_sources(
             session, workspace_id, work_id, references
         )
@@ -329,7 +430,7 @@ def create_issue(
     except SQLAlchemyError as error:
         session.rollback()
         raise IssueOperationRetryable from error
-    return _data(issue, len(references))
+    return _data(session, issue, len(references))
 
 
 def read_issue(
@@ -342,7 +443,7 @@ def read_issue(
     try:
         _require_management(session, actor_id, workspace_id, work_id)
         issue = _load_issue(session, issue_id, lock=False)
-        return _data(issue, _source_count(session, issue.id))
+        return _data(session, issue, _source_count(session, issue.id))
     except (IssueManagementForbidden, IssueUnavailable, IssueOperationRetryable):
         raise
     except SQLAlchemyError as error:
@@ -360,12 +461,14 @@ def update_issue(
     description: str,
     decision: str,
     reason: str,
+    adjustment_note: str | None,
     status: str,
     expected_revision: int,
 ) -> IssueData:
     description, decision, reason, status = _values(
         description, decision, reason, status
     )
+    adjustment_note = _optional_text(adjustment_note, 4_000)
     if expected_revision <= 0:
         raise IssueInvalid
     try:
@@ -374,12 +477,24 @@ def update_issue(
         if issue.revision != expected_revision:
             session.rollback()
             raise IssueRevisionConflict
+        adjustment_changed = adjustment_note != issue.adjustment_note
         issue.description = description
         issue.decision = decision
         issue.reason = reason
+        issue.adjustment_note = adjustment_note
         issue.status = status
         issue.revision += 1
         issue.updated_at = _now()
+        if adjustment_changed:
+            issue.adjustment_generation += 1
+            for link in session.scalars(
+                select(IssueRetestLink)
+                .where(IssueRetestLink.issue_id == issue.id)
+                .with_for_update()
+            ):
+                link.conclusion = None
+                link.conclusion_reason = None
+                link.updated_at = _now()
         session.flush()
         source_count = _source_count(session, issue.id)
         _commit_or_rollback(session)
@@ -393,7 +508,204 @@ def update_issue(
     except SQLAlchemyError as error:
         session.rollback()
         raise IssueOperationRetryable from error
-    return _data(issue, source_count)
+    return _data(session, issue, source_count)
+
+
+def bind_retest_session(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    issue_id: UUID,
+    session_id: UUID,
+    expected_revision: int,
+) -> IssueRetestLink:
+    if expected_revision <= 0:
+        raise IssueInvalid
+    try:
+        _require_management(session, actor_id, workspace_id, work_id)
+        issue = _load_issue(session, issue_id, lock=True)
+        if issue.revision != expected_revision:
+            session.rollback()
+            raise IssueRevisionConflict
+        if issue.adjustment_note is None:
+            session.rollback()
+            raise IssueInvalid
+        set_playtest_management_scope(session, workspace_id, work_id)
+        item = session.scalar(
+            select(PlaytestSession)
+            .where(
+                PlaytestSession.id == session_id,
+                PlaytestSession.workspace_id == workspace_id,
+                PlaytestSession.work_id == work_id,
+            )
+            .with_for_update()
+        )
+        if item is None:
+            session.rollback()
+            raise IssueUnavailable
+        link = IssueRetestLink(
+            issue_id=issue.id,
+            session_id=item.id,
+            adjustment_generation=issue.adjustment_generation,
+        )
+        session.add(link)
+        issue.revision += 1
+        issue.updated_at = _now()
+        session.flush()
+    except (
+        IssueInvalid,
+        IssueManagementForbidden,
+        IssueRevisionConflict,
+        IssueUnavailable,
+    ):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise IssueOperationRetryable from error
+    return link
+
+
+def list_retests(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    issue_id: UUID,
+    page: int,
+    size: int,
+) -> tuple[list[IssueRetestData], int]:
+    try:
+        _require_management(session, actor_id, workspace_id, work_id)
+        issue = _load_issue(session, issue_id, lock=False)
+        set_playtest_management_scope(session, workspace_id, work_id)
+        total = (
+            session.scalar(
+                select(func.count())
+                .select_from(IssueRetestLink)
+                .where(IssueRetestLink.issue_id == issue.id)
+            )
+            or 0
+        )
+        rows = session.execute(
+            select(IssueRetestLink, PlaytestSession)
+            .join(PlaytestSession, PlaytestSession.id == IssueRetestLink.session_id)
+            .where(IssueRetestLink.issue_id == issue.id)
+            .order_by(PlaytestSession.scheduled_at.desc(), PlaytestSession.id.desc())
+            .offset((page - 1) * size)
+            .limit(size)
+        )
+    except (IssueManagementForbidden, IssueUnavailable, IssueOperationRetryable):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise IssueOperationRetryable from error
+    return [
+        _retest_data(link, item, issue.adjustment_generation) for link, item in rows
+    ], total
+
+
+def save_retest_conclusion(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    issue_id: UUID,
+    retest_id: UUID,
+    *,
+    conclusion: str,
+    reason: str,
+    status: str,
+    expected_revision: int,
+) -> IssueData:
+    reason = _required_text(reason, 4_000)
+    if (
+        not isinstance(conclusion, str)
+        or conclusion not in CONCLUSIONS
+        or not isinstance(status, str)
+        or status not in STATUSES
+        or expected_revision <= 0
+    ):
+        raise IssueInvalid
+    try:
+        _require_management(session, actor_id, workspace_id, work_id)
+        issue = _load_issue(session, issue_id, lock=True)
+        if issue.revision != expected_revision:
+            session.rollback()
+            raise IssueRevisionConflict
+        retest = session.scalar(
+            select(IssueRetestLink)
+            .where(
+                IssueRetestLink.id == retest_id, IssueRetestLink.issue_id == issue.id
+            )
+            .with_for_update()
+        )
+        if retest is None:
+            session.rollback()
+            raise IssueUnavailable
+        if retest.adjustment_generation != issue.adjustment_generation:
+            session.rollback()
+            raise IssueInvalid
+        set_playtest_management_scope(session, workspace_id, work_id)
+        item = session.scalar(
+            select(PlaytestSession).where(
+                PlaytestSession.id == retest.session_id,
+                PlaytestSession.workspace_id == workspace_id,
+                PlaytestSession.work_id == work_id,
+            )
+        )
+        if item is None:
+            session.rollback()
+            raise IssueUnavailable
+        if item.status != "started" or not item.actual_material_recorded:
+            session.rollback()
+            raise IssueRetestResultRequired
+        if (
+            conclusion != "insufficient_evidence"
+            and not evidence_service.has_issue_evidence_from_session(
+                session, _references_for_issue(session, issue.id), item.id
+            )
+        ):
+            session.rollback()
+            raise IssueRetestEvidenceRequired
+        previous = list(
+            session.scalars(
+                select(IssueRetestLink)
+                .where(
+                    IssueRetestLink.issue_id == issue.id,
+                    IssueRetestLink.id != retest.id,
+                    IssueRetestLink.conclusion.is_not(None),
+                )
+                .with_for_update()
+            )
+        )
+        for link in previous:
+            link.conclusion = None
+            link.conclusion_reason = None
+            link.updated_at = _now()
+        session.flush()
+        retest.conclusion = conclusion
+        retest.conclusion_reason = reason
+        retest.updated_at = _now()
+        issue.status = status
+        issue.revision += 1
+        issue.updated_at = _now()
+        session.flush()
+        source_count = _source_count(session, issue.id)
+        _commit_or_rollback(session)
+    except (
+        IssueInvalid,
+        IssueManagementForbidden,
+        IssueRetestEvidenceRequired,
+        IssueRetestResultRequired,
+        IssueRevisionConflict,
+        IssueUnavailable,
+    ):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise IssueOperationRetryable from error
+    return _data(session, issue, source_count)
 
 
 def add_issue_evidence(
@@ -443,7 +755,7 @@ def add_issue_evidence(
     except SQLAlchemyError as error:
         session.rollback()
         raise IssueOperationRetryable from error
-    return _data(issue, source_count)
+    return _data(session, issue, source_count)
 
 
 def remove_issue_evidence(
@@ -494,7 +806,7 @@ def remove_issue_evidence(
     except SQLAlchemyError as error:
         session.rollback()
         raise IssueOperationRetryable from error
-    return _data(issue, source_count)
+    return _data(session, issue, source_count)
 
 
 def list_issue_evidence(

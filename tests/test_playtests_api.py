@@ -55,7 +55,7 @@ def test_create_plan_hides_unavailable_participant_details(
     monkeypatch.setattr(
         service,
         "create_plan",
-        lambda *_: (_ for _ in ()).throw(service.PlaytestParticipantUnavailable),
+        lambda *_, **__: (_ for _ in ()).throw(service.PlaytestParticipantUnavailable),
     )
     workspace_id, work_id = uuid4(), uuid4()
 

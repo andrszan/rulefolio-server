@@ -22,6 +22,7 @@ from app.files import service as files_service
 from app.files.models import StoredFile
 from app.identity import service as identity_service
 from app.identity.models import Account
+from app.issues import service as issues_service
 from app.notifications.models import MailOutbox
 from app.notifications.service import enqueue_business_mail, suppress_business_mails
 from app.playtests.models import (
@@ -74,6 +75,18 @@ class PlaytestSessionStateInvalid(Exception):
 
 
 class PlaytestOperationRetryable(Exception):
+    pass
+
+
+class PlaytestRetestInvalid(Exception):
+    pass
+
+
+class PlaytestRetestUnavailable(Exception):
+    pass
+
+
+class PlaytestRetestRevisionConflict(Exception):
     pass
 
 
@@ -705,10 +718,19 @@ def create_plan(
     observation_goals: str,
     recording_method: str,
     drafts: tuple[SessionDraft, ...],
+    *,
+    retest_issue_id: UUID | None = None,
+    retest_issue_expected_revision: int | None = None,
 ) -> PlanData:
     observation_goals = observation_goals.strip()
     recording_method = recording_method.strip()
-    if not observation_goals or not recording_method or not drafts:
+    if (
+        not observation_goals
+        or not recording_method
+        or not drafts
+        or (retest_issue_id is None) != (retest_issue_expected_revision is None)
+        or (retest_issue_id is not None and len(drafts) != 1)
+    ):
         raise PlaytestMaterialSelectionInvalid
     try:
         _require_management(session, actor_id, workspace_id, work_id)
@@ -721,9 +743,36 @@ def create_plan(
         )
         session.add(plan)
         session.flush()
-        for draft in drafts:
+        sessions = tuple(
             _create_session(session, actor_id, workspace_id, work_id, plan, draft)
+            for draft in drafts
+        )
+        if retest_issue_id is not None:
+            issues_service.bind_retest_session(
+                session,
+                actor_id,
+                workspace_id,
+                work_id,
+                retest_issue_id,
+                sessions[0].id,
+                retest_issue_expected_revision,
+            )
         _commit_or_rollback(session)
+    except issues_service.IssueRevisionConflict as error:
+        session.rollback()
+        raise PlaytestRetestRevisionConflict from error
+    except (
+        issues_service.IssueManagementForbidden,
+        issues_service.IssueUnavailable,
+    ) as error:
+        session.rollback()
+        raise PlaytestRetestUnavailable from error
+    except issues_service.IssueInvalid as error:
+        session.rollback()
+        raise PlaytestRetestInvalid from error
+    except issues_service.IssueOperationRetryable as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
     except (
         PlaytestManagementForbidden,
         PlaytestParticipantUnavailable,
