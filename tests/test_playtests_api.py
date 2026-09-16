@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from app.evidence import service as evidence_service
 from app.identity import service as identity_service
 from app.identity.models import Account, SessionRecord
+from app.issues import service as issues_service
 from app.main import app
 from app.playtests import service
 
@@ -149,6 +150,8 @@ def test_openapi_includes_result_contract() -> None:
         actual_material["properties"]["changeReason"]["anyOf"][0]["maxLength"] == 4_000
     )
     assert "materialCandidates" in result["properties"]
+    assert request["properties"]["actualPlayMode"]["anyOf"][0]["maxLength"] == 160
+    assert "actualPlayMode" in result["properties"]
 
 
 def test_result_request_returns_field_error_for_invalid_actual_material(
@@ -284,3 +287,167 @@ def test_openapi_includes_feedback_contract() -> None:
     assert "expectedRevision" in direct["properties"]
     assert "feedbackItems" in participant["properties"]
     assert "recordedByAccountId" in submission["properties"]
+
+
+def test_overview_uses_camel_case_minimal_projections_and_stable_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = Account(id=uuid4(), email="collaborator@example.com", status="active")
+    _authorize(monkeypatch, account)
+    workspace_id, work_id, session_id, issue_id = uuid4(), uuid4(), uuid4(), uuid4()
+    scheduled_at = datetime(2026, 9, 16, 10, tzinfo=UTC)
+    filters = service.OverviewFilters(
+        scheduled_from=scheduled_at,
+        actual_headcount_min=0,
+        actual_headcount_max=2,
+        actual_play_mode="实体桌游",
+    )
+    monkeypatch.setattr(
+        service,
+        "read_overview",
+        lambda *_: service.OverviewData(
+            filters=filters,
+            included_session_count=1,
+            missing_actual_headcount_count=0,
+            missing_actual_duration_count=0,
+            missing_completion_status_count=0,
+            missing_actual_play_mode_count=0,
+            temporary_variant_count=1,
+            headcount_coverage=(service.HeadcountCoverageData(0, 1, 0, 0, 1),),
+            play_modes=("实体桌游", "规则补充复测"),
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "list_overview_sessions",
+        lambda *_: (
+            [
+                service.OverviewSessionData(
+                    id=session_id,
+                    scheduled_at=scheduled_at,
+                    actual_headcount=0,
+                    actual_duration_minutes=45,
+                    completion_status="completed",
+                    actual_play_mode="实体桌游",
+                    has_temporary_variant=True,
+                )
+            ],
+            1,
+        ),
+    )
+    monkeypatch.setattr(
+        service,
+        "list_overview_issues",
+        lambda *_: (
+            [
+                issues_service.OverviewIssueData(
+                    id=issue_id,
+                    description="开局提示需要调整。",
+                    decision="modify",
+                    status="open",
+                    verification_status="pending",
+                    current_conclusion_type=None,
+                    current_conclusion_session_id=None,
+                )
+            ],
+            1,
+        ),
+    )
+
+    with TestClient(app) as client:
+        summary = client.get(
+            f"/api/v1/workspaces/{workspace_id}/works/{work_id}/playtest-overview",
+            params={
+                "scheduledFrom": scheduled_at.isoformat(),
+                "actualHeadcountMin": "0",
+                "actualHeadcountMax": "2",
+                "actualPlayMode": "实体桌游",
+            },
+            headers={"Authorization": "Bearer session-token"},
+        )
+        sessions = client.get(
+            f"/api/v1/workspaces/{workspace_id}/works/{work_id}/playtest-overview/sessions",
+            headers={"Authorization": "Bearer session-token"},
+        )
+        issues = client.get(
+            f"/api/v1/workspaces/{workspace_id}/works/{work_id}/playtest-overview/issues",
+            params={"kind": "pending-retest"},
+            headers={"Authorization": "Bearer session-token"},
+        )
+        invalid = client.get(
+            f"/api/v1/workspaces/{workspace_id}/works/{work_id}/playtest-overview",
+            params={"actualHeadcountMin": "2", "actualHeadcountMax": "0"},
+            headers={"Authorization": "Bearer session-token"},
+        )
+
+    assert summary.status_code == sessions.status_code == issues.status_code == 200
+    assert summary.json()["data"] == {
+        "filters": {
+            "scheduledFrom": scheduled_at.isoformat(),
+            "scheduledBefore": None,
+            "actualHeadcountMin": 0,
+            "actualHeadcountMax": 2,
+            "actualPlayMode": "实体桌游",
+        },
+        "includedSessionCount": 1,
+        "missingActualHeadcountCount": 0,
+        "missingActualDurationCount": 0,
+        "missingCompletionStatusCount": 0,
+        "missingActualPlayModeCount": 0,
+        "temporaryVariantCount": 1,
+        "headcountCoverage": [
+            {
+                "actualHeadcount": 0,
+                "completedCount": 1,
+                "interruptedCount": 0,
+                "unrecordedCompletionCount": 0,
+                "temporaryVariantCount": 1,
+            }
+        ],
+        "playModes": ["实体桌游", "规则补充复测"],
+    }
+    assert sessions.json()["data"]["items"] == [
+        {
+            "id": str(session_id),
+            "scheduledAt": scheduled_at.isoformat(),
+            "actualHeadcount": 0,
+            "actualDurationMinutes": 45,
+            "completionStatus": "completed",
+            "actualPlayMode": "实体桌游",
+            "hasTemporaryVariant": True,
+        }
+    ]
+    assert issues.json()["data"]["items"] == [
+        {
+            "id": str(issue_id),
+            "description": "开局提示需要调整。",
+            "decision": "modify",
+            "status": "open",
+            "verificationStatus": "pending",
+            "currentConclusionType": None,
+            "currentConclusionSessionId": None,
+        }
+    ]
+    assert invalid.status_code == 422
+    assert invalid.json()["data"] == {"reason": "playtest_overview_invalid"}
+
+    monkeypatch.setattr(
+        service,
+        "read_overview",
+        lambda *_: (_ for _ in ()).throw(service.PlaytestOverviewUnavailable),
+    )
+    with TestClient(app) as client:
+        unavailable = client.get(
+            f"/api/v1/workspaces/{workspace_id}/works/{work_id}/playtest-overview",
+            headers={"Authorization": "Bearer session-token"},
+        )
+        invalid_kind = client.get(
+            f"/api/v1/workspaces/{workspace_id}/works/{work_id}/playtest-overview/issues",
+            params={"kind": "unknown"},
+            headers={"Authorization": "Bearer session-token"},
+        )
+
+    assert unavailable.status_code == 404
+    assert unavailable.json()["data"] == {"reason": "playtest_overview_unavailable"}
+    assert invalid_kind.status_code == 422
+    assert invalid_kind.json()["data"] == {"reason": "playtest_overview_invalid"}

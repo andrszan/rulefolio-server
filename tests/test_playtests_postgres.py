@@ -353,6 +353,7 @@ def test_result_actual_participation_materials_and_observations(
                 actual_headcount=2,
                 actual_duration_minutes=0,
                 completion_status="completed",
+                actual_play_mode="  实体桌游  ",
                 actual_material=playtests_service.ActualMaterialDraft(
                     rule_name=started.rule_name,
                     rule_description=started.rule_description,
@@ -406,6 +407,7 @@ def test_result_actual_participation_materials_and_observations(
         assert result.actual_headcount == 2
         assert result.actual_duration_minutes == 0
         assert result.completion_status == "completed"
+        assert result.actual_play_mode == "实体桌游"
         assert result.actual_material is not None
         assert result.actual_material.change_reason == "现场改用辅助页说明规则。"
         assert [material.id for material in result.actual_material.materials] == [
@@ -421,6 +423,60 @@ def test_result_actual_participation_materials_and_observations(
         }
         assert result.observations[0].id == fact.observation.id
         assert result.observations[0].kind == "organizer_interpretation"
+
+        cleared = playtests_service.save_result(
+            session,
+            organizer,
+            workspace,
+            work.id,
+            session_id,
+            result.session.revision,
+            playtests_service.ResultDraft(
+                actual_headcount=2,
+                actual_duration_minutes=0,
+                completion_status="completed",
+                actual_play_mode="   ",
+                actual_material=playtests_service.ActualMaterialDraft(
+                    rule_name=started.rule_name,
+                    rule_description=started.rule_description,
+                    rule_content=started.rule_content,
+                    material_file_ids=(second.id,),
+                    change_reason="现场改用辅助页说明规则。",
+                ),
+                actual_participants=(
+                    playtests_service.ActualParticipantDraft(
+                        planned_account_id=guest,
+                        temporary_code=None,
+                        seat_or_faction="先手",
+                        score_or_outcome="获胜",
+                    ),
+                    playtests_service.ActualParticipantDraft(
+                        planned_account_id=None,
+                        temporary_code="临场观察者",
+                        seat_or_faction=None,
+                        score_or_outcome=None,
+                    ),
+                ),
+            ),
+        )
+        assert cleared.actual_play_mode is None
+        with pytest.raises(playtests_service.PlaytestResultInvalid):
+            playtests_service.save_result(
+                session,
+                organizer,
+                workspace,
+                work.id,
+                session_id,
+                cleared.session.revision,
+                playtests_service.ResultDraft(
+                    actual_headcount=2,
+                    actual_duration_minutes=0,
+                    completion_status="completed",
+                    actual_play_mode="x" * 161,
+                    actual_material=None,
+                    actual_participants=(),
+                ),
+            )
 
         session.rollback()
         set_actor(session, guest)

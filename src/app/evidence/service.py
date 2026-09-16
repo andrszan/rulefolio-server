@@ -137,6 +137,24 @@ def list_observations(
     )
 
 
+def overview_temporary_variant_session_ids(
+    session: Session, session_ids: set[UUID]
+) -> frozenset[UUID]:
+    """返回 overview 已授权场次中存在现场临时变化记录的场次 ID。"""
+    if not session_ids:
+        return frozenset()
+    return frozenset(
+        session.scalars(
+            select(PlaytestObservation.session_id)
+            .where(
+                PlaytestObservation.session_id.in_(session_ids),
+                PlaytestObservation.kind == "temporary_variant",
+            )
+            .distinct()
+        )
+    )
+
+
 def _issue_session_context(session: Session, session_id: UUID) -> PlaytestSession:
     set_playtest_session_scope(session, session_id)
     item = session.scalar(

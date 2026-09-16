@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, status
+from fastapi import APIRouter, Depends, Header, Query, status
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy.orm import Session
@@ -16,6 +16,7 @@ from app.files.router import _binary_response
 from app.identity import service as identity_service
 from app.identity.models import Account
 from app.identity.router import _bearer_token
+from app.issues import service as issues_service
 from app.playtests import service
 
 router = APIRouter(tags=["playtests"])
@@ -311,6 +312,9 @@ class ResultRequest(BaseModel):
     completion_status: str | None = Field(
         default=None, validation_alias="completionStatus"
     )
+    actual_play_mode: str | None = Field(
+        default=None, max_length=160, validation_alias="actualPlayMode"
+    )
     actual_material: ActualMaterialRequest | None = Field(
         default=None, validation_alias="actualMaterial"
     )
@@ -324,6 +328,11 @@ class ResultRequest(BaseModel):
         if value not in {None, "completed", "interrupted"}:
             raise ValueError("完成状态无效")
         return value
+
+    @field_validator("actual_play_mode", mode="before")
+    @classmethod
+    def normalize_actual_play_mode(cls, value: object) -> object:
+        return value.strip() or None if isinstance(value, str) else value
 
 
 class ObservationRequest(BaseModel):
@@ -448,6 +457,7 @@ class ResultResponseData(BaseModel):
         serialization_alias="actualDurationMinutes"
     )
     completion_status: str | None = Field(serialization_alias="completionStatus")
+    actual_play_mode: str | None = Field(serialization_alias="actualPlayMode")
     material_candidates: list[MaterialResponseData] = Field(
         serialization_alias="materialCandidates"
     )
@@ -458,6 +468,82 @@ class ResultResponseData(BaseModel):
         serialization_alias="actualParticipants"
     )
     observations: list[ObservationResponseData]
+
+
+class OverviewFiltersResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    scheduled_from: str | None = Field(serialization_alias="scheduledFrom")
+    scheduled_before: str | None = Field(serialization_alias="scheduledBefore")
+    actual_headcount_min: int | None = Field(serialization_alias="actualHeadcountMin")
+    actual_headcount_max: int | None = Field(serialization_alias="actualHeadcountMax")
+    actual_play_mode: str | None = Field(serialization_alias="actualPlayMode")
+
+
+class HeadcountCoverageResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    actual_headcount: int = Field(serialization_alias="actualHeadcount")
+    completed_count: int = Field(serialization_alias="completedCount")
+    interrupted_count: int = Field(serialization_alias="interruptedCount")
+    unrecorded_completion_count: int = Field(
+        serialization_alias="unrecordedCompletionCount"
+    )
+    temporary_variant_count: int = Field(serialization_alias="temporaryVariantCount")
+
+
+class PlaytestOverviewResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    filters: OverviewFiltersResponseData
+    included_session_count: int = Field(serialization_alias="includedSessionCount")
+    missing_actual_headcount_count: int = Field(
+        serialization_alias="missingActualHeadcountCount"
+    )
+    missing_actual_duration_count: int = Field(
+        serialization_alias="missingActualDurationCount"
+    )
+    missing_completion_status_count: int = Field(
+        serialization_alias="missingCompletionStatusCount"
+    )
+    missing_actual_play_mode_count: int = Field(
+        serialization_alias="missingActualPlayModeCount"
+    )
+    temporary_variant_count: int = Field(serialization_alias="temporaryVariantCount")
+    headcount_coverage: list[HeadcountCoverageResponseData] = Field(
+        serialization_alias="headcountCoverage"
+    )
+    play_modes: list[str] = Field(serialization_alias="playModes")
+
+
+class OverviewSessionResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: UUID
+    scheduled_at: str = Field(serialization_alias="scheduledAt")
+    actual_headcount: int | None = Field(serialization_alias="actualHeadcount")
+    actual_duration_minutes: int | None = Field(
+        serialization_alias="actualDurationMinutes"
+    )
+    completion_status: str | None = Field(serialization_alias="completionStatus")
+    actual_play_mode: str | None = Field(serialization_alias="actualPlayMode")
+    has_temporary_variant: bool = Field(serialization_alias="hasTemporaryVariant")
+
+
+class OverviewIssueResponseData(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: UUID
+    description: str
+    decision: str
+    status: str
+    verification_status: str = Field(serialization_alias="verificationStatus")
+    current_conclusion_type: str | None = Field(
+        serialization_alias="currentConclusionType"
+    )
+    current_conclusion_session_id: UUID | None = Field(
+        serialization_alias="currentConclusionSessionId"
+    )
 
 
 class ObservationMutationResponseData(BaseModel):
@@ -496,6 +582,50 @@ def _optional_idempotency_key(
 
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
+
+
+def _overview_filters(
+    scheduled_from: Annotated[str | None, Query(alias="scheduledFrom")] = None,
+    scheduled_before: Annotated[str | None, Query(alias="scheduledBefore")] = None,
+    actual_headcount_min: Annotated[
+        str | None, Query(alias="actualHeadcountMin")
+    ] = None,
+    actual_headcount_max: Annotated[
+        str | None, Query(alias="actualHeadcountMax")
+    ] = None,
+    actual_play_mode: Annotated[str | None, Query(alias="actualPlayMode")] = None,
+) -> service.OverviewFilters:
+    def date_value(value: str | None) -> datetime | None:
+        if value is None:
+            return None
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError as error:
+            raise api_error(
+                422, "概览筛选条件有误", "playtest_overview_invalid"
+            ) from error
+        if parsed.tzinfo is None:
+            raise api_error(422, "概览筛选条件有误", "playtest_overview_invalid")
+        return parsed
+
+    def headcount_value(value: str | None) -> int | None:
+        if value is None:
+            return None
+        if re.fullmatch(r"[0-9]+", value) is None:
+            raise api_error(422, "概览筛选条件有误", "playtest_overview_invalid")
+        return int(value)
+
+    minimum = headcount_value(actual_headcount_min)
+    maximum = headcount_value(actual_headcount_max)
+    if maximum is not None and minimum is not None and maximum < minimum:
+        raise api_error(422, "概览筛选条件有误", "playtest_overview_invalid")
+    return service.OverviewFilters(
+        scheduled_from=date_value(scheduled_from),
+        scheduled_before=date_value(scheduled_before),
+        actual_headcount_min=minimum,
+        actual_headcount_max=maximum,
+        actual_play_mode=actual_play_mode,
+    )
 
 
 def _notification_response(
@@ -666,6 +796,7 @@ def _result_response(data: service.ResultData) -> ResultResponseData:
         actual_headcount=data.actual_headcount,
         actual_duration_minutes=data.actual_duration_minutes,
         completion_status=data.completion_status,
+        actual_play_mode=data.actual_play_mode,
         material_candidates=[
             _material_response(material) for material in data.material_candidates
         ],
@@ -699,6 +830,63 @@ def _result_response(data: service.ResultData) -> ResultResponseData:
     )
 
 
+def _overview_response(data: service.OverviewData) -> PlaytestOverviewResponseData:
+    return PlaytestOverviewResponseData(
+        filters=OverviewFiltersResponseData(
+            scheduled_from=_iso(data.filters.scheduled_from),
+            scheduled_before=_iso(data.filters.scheduled_before),
+            actual_headcount_min=data.filters.actual_headcount_min,
+            actual_headcount_max=data.filters.actual_headcount_max,
+            actual_play_mode=data.filters.actual_play_mode,
+        ),
+        included_session_count=data.included_session_count,
+        missing_actual_headcount_count=data.missing_actual_headcount_count,
+        missing_actual_duration_count=data.missing_actual_duration_count,
+        missing_completion_status_count=data.missing_completion_status_count,
+        missing_actual_play_mode_count=data.missing_actual_play_mode_count,
+        temporary_variant_count=data.temporary_variant_count,
+        headcount_coverage=[
+            HeadcountCoverageResponseData(
+                actual_headcount=item.actual_headcount,
+                completed_count=item.completed_count,
+                interrupted_count=item.interrupted_count,
+                unrecorded_completion_count=item.unrecorded_completion_count,
+                temporary_variant_count=item.temporary_variant_count,
+            )
+            for item in data.headcount_coverage
+        ],
+        play_modes=list(data.play_modes),
+    )
+
+
+def _overview_session_response(
+    data: service.OverviewSessionData,
+) -> OverviewSessionResponseData:
+    return OverviewSessionResponseData(
+        id=data.id,
+        scheduled_at=data.scheduled_at.isoformat(),
+        actual_headcount=data.actual_headcount,
+        actual_duration_minutes=data.actual_duration_minutes,
+        completion_status=data.completion_status,
+        actual_play_mode=data.actual_play_mode,
+        has_temporary_variant=data.has_temporary_variant,
+    )
+
+
+def _overview_issue_response(
+    data: issues_service.OverviewIssueData,
+) -> OverviewIssueResponseData:
+    return OverviewIssueResponseData(
+        id=data.id,
+        description=data.description,
+        decision=data.decision,
+        status=data.status,
+        verification_status=data.verification_status,
+        current_conclusion_type=data.current_conclusion_type,
+        current_conclusion_session_id=data.current_conclusion_session_id,
+    )
+
+
 def _result_draft(data: ResultRequest) -> service.ResultDraft:
     return service.ResultDraft(
         actual_headcount=data.actual_headcount,
@@ -724,6 +912,7 @@ def _result_draft(data: ResultRequest) -> service.ResultDraft:
             )
             for participant in data.actual_participants
         ),
+        actual_play_mode=data.actual_play_mode,
     )
 
 
@@ -762,6 +951,16 @@ def _draft(data: SessionRequest) -> service.SessionDraft:
         material_file_ids=tuple(data.material_file_ids),
         participant_emails=tuple(data.participant_emails),
     )
+
+
+def _overview_error(error: Exception) -> None:
+    if isinstance(error, service.PlaytestOverviewUnavailable):
+        raise api_error(
+            404, "试玩概览不可用", "playtest_overview_unavailable"
+        ) from error
+    if isinstance(error, service.PlaytestOverviewInvalid):
+        raise api_error(422, "概览筛选条件有误", "playtest_overview_invalid") from error
+    _playtest_error(error)
 
 
 def _playtest_error(error: Exception) -> None:
@@ -1113,6 +1312,108 @@ def cancel_session(
         _playtest_error(error)
         raise
     return ApiResponse(code=200, message="试玩场次已取消", data=_session_response(item))
+
+
+@router.get(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-overview",
+    response_model=ApiResponse[PlaytestOverviewResponseData],
+    summary="读取试玩概览",
+)
+def read_overview(
+    workspace_id: UUID,
+    work_id: UUID,
+    filters: Annotated[service.OverviewFilters, Depends(_overview_filters)],
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[PlaytestOverviewResponseData]:
+    try:
+        overview = service.read_overview(
+            session, account.id, workspace_id, work_id, filters
+        )
+    except Exception as error:
+        _overview_error(error)
+        raise
+    return ApiResponse(
+        code=200, message="试玩概览已加载", data=_overview_response(overview)
+    )
+
+
+@router.get(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-overview/sessions",
+    response_model=ApiResponse[Page[OverviewSessionResponseData]],
+    summary="列出概览场次事实",
+)
+def list_overview_sessions(
+    workspace_id: UUID,
+    work_id: UUID,
+    filters: Annotated[service.OverviewFilters, Depends(_overview_filters)],
+    params: Annotated[PageParams, Depends()],
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[Page[OverviewSessionResponseData]]:
+    try:
+        items, total = service.list_overview_sessions(
+            session,
+            account.id,
+            workspace_id,
+            work_id,
+            filters,
+            params.page,
+            params.size,
+        )
+    except Exception as error:
+        _overview_error(error)
+        raise
+    return ApiResponse(
+        code=200,
+        message="概览场次已加载",
+        data=Page(
+            items=[_overview_session_response(item) for item in items],
+            page=params.page,
+            size=params.size,
+            total=total,
+        ),
+    )
+
+
+@router.get(
+    "/workspaces/{workspace_id}/works/{work_id}/playtest-overview/issues",
+    response_model=ApiResponse[Page[OverviewIssueResponseData]],
+    summary="列出概览问题摘要",
+)
+def list_overview_issues(
+    workspace_id: UUID,
+    work_id: UUID,
+    kind: str | None = Query(default=None),
+    params: PageParams = Depends(),
+    account: Account = Depends(_authenticated_account),
+    session: Session = Depends(get_db),
+) -> ApiResponse[Page[OverviewIssueResponseData]]:
+    if kind not in {"pending-retest", "needs-action"}:
+        raise api_error(422, "概览筛选条件有误", "playtest_overview_invalid")
+    try:
+        items, total = service.list_overview_issues(
+            session,
+            account.id,
+            workspace_id,
+            work_id,
+            kind,
+            params.page,
+            params.size,
+        )
+    except Exception as error:
+        _overview_error(error)
+        raise
+    return ApiResponse(
+        code=200,
+        message="概览问题已加载",
+        data=Page(
+            items=[_overview_issue_response(item) for item in items],
+            page=params.page,
+            size=params.size,
+            total=total,
+        ),
+    )
 
 
 @router.get(

@@ -203,7 +203,7 @@ def _baseline_counts() -> dict[str, int]:
         "playtest_sessions": 2,
         "playtest_confirmations": 1,
         "playtest_actual_participants": 2,
-        "playtest_observations": 3,
+        "playtest_observations": 4,
         "playtest_feedback_items": 3,
         "playtest_feedback_submissions": 2,
         "playtest_feedback_answers": 4,
@@ -386,6 +386,7 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
                 actual_headcount=1,
                 actual_duration_minutes=55,
                 completion_status="completed",
+                actual_play_mode="实体桌游",
                 actual_material=playtests_service.ActualMaterialDraft(
                     rule_name=first_started.rule_name,
                     rule_description=first_started.rule_description,
@@ -424,6 +425,16 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
             first_fact.revision,
             "organizer_interpretation",
             "分工出现得早，现有提示已经足以引导协作。",
+        )
+        playtests_service.create_observation(
+            session,
+            owner.id,
+            workspace.id,
+            work.id,
+            first_started.id,
+            first_interpretation.revision,
+            "temporary_variant",
+            "现场临时将一枚线索标记为公开信息。",
         )
         feedback_items = (
             playtests_service.create_feedback_item(
@@ -634,6 +645,7 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
                 actual_headcount=1,
                 actual_duration_minutes=50,
                 completion_status="completed",
+                actual_play_mode="规则补充复测",
                 actual_material=playtests_service.ActualMaterialDraft(
                     rule_name=retest_started.rule_name,
                     rule_description=retest_started.rule_description,

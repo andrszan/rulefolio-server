@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -87,6 +87,14 @@ class PlaytestRetestUnavailable(Exception):
 
 
 class PlaytestRetestRevisionConflict(Exception):
+    pass
+
+
+class PlaytestOverviewInvalid(Exception):
+    pass
+
+
+class PlaytestOverviewUnavailable(Exception):
     pass
 
 
@@ -222,6 +230,7 @@ class ResultData:
     actual_headcount: int | None
     actual_duration_minutes: int | None
     completion_status: str | None
+    actual_play_mode: str | None
     material_candidates: tuple[MaterialData, ...]
     actual_material: ActualMaterialData | None
     actual_participants: tuple[ActualParticipantData, ...]
@@ -252,6 +261,49 @@ class ResultDraft:
     completion_status: str | None
     actual_material: ActualMaterialDraft | None
     actual_participants: tuple[ActualParticipantDraft, ...]
+    actual_play_mode: str | None = None
+
+
+@dataclass(frozen=True)
+class OverviewFilters:
+    scheduled_from: datetime | None = None
+    scheduled_before: datetime | None = None
+    actual_headcount_min: int | None = None
+    actual_headcount_max: int | None = None
+    actual_play_mode: str | None = None
+
+
+@dataclass(frozen=True)
+class HeadcountCoverageData:
+    actual_headcount: int
+    completed_count: int
+    interrupted_count: int
+    unrecorded_completion_count: int
+    temporary_variant_count: int
+
+
+@dataclass(frozen=True)
+class OverviewData:
+    filters: OverviewFilters
+    included_session_count: int
+    missing_actual_headcount_count: int
+    missing_actual_duration_count: int
+    missing_completion_status_count: int
+    missing_actual_play_mode_count: int
+    temporary_variant_count: int
+    headcount_coverage: tuple[HeadcountCoverageData, ...]
+    play_modes: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class OverviewSessionData:
+    id: UUID
+    scheduled_at: datetime
+    actual_headcount: int | None
+    actual_duration_minutes: int | None
+    completion_status: str | None
+    actual_play_mode: str | None
+    has_temporary_variant: bool
 
 
 @dataclass(frozen=True)
@@ -295,6 +347,18 @@ def _require_management(
     except works_service.WorkOperationRetryable as error:
         raise PlaytestOperationRetryable from error
     _scope(session, workspace_id, work_id)
+
+
+def _require_overview(
+    session: Session, actor_id: UUID, workspace_id: UUID, work_id: UUID
+) -> None:
+    set_actor(session, actor_id)
+    try:
+        works_service.ensure_work_access(session, actor_id, workspace_id, work_id)
+    except works_service.WorkUnavailable as error:
+        raise PlaytestOverviewUnavailable from error
+    except works_service.WorkOperationRetryable as error:
+        raise PlaytestOperationRetryable from error
 
 
 def _load_plan(
@@ -580,6 +644,219 @@ def _create_session(
     )
     session.flush()
     return item
+
+
+def _validated_overview_filters(filters: OverviewFilters) -> OverviewFilters:
+    if (
+        (filters.scheduled_from is not None and filters.scheduled_from.tzinfo is None)
+        or (
+            filters.scheduled_before is not None
+            and filters.scheduled_before.tzinfo is None
+        )
+        or (
+            filters.actual_headcount_min is not None
+            and (
+                not isinstance(filters.actual_headcount_min, int)
+                or isinstance(filters.actual_headcount_min, bool)
+                or filters.actual_headcount_min < 0
+            )
+        )
+        or (
+            filters.actual_headcount_max is not None
+            and (
+                not isinstance(filters.actual_headcount_max, int)
+                or isinstance(filters.actual_headcount_max, bool)
+                or filters.actual_headcount_max < 0
+            )
+        )
+        or (
+            filters.actual_headcount_min is not None
+            and filters.actual_headcount_max is not None
+            and filters.actual_headcount_max < filters.actual_headcount_min
+        )
+    ):
+        raise PlaytestOverviewInvalid
+    try:
+        actual_play_mode = _optional_text(filters.actual_play_mode, 160)
+    except PlaytestResultInvalid as error:
+        raise PlaytestOverviewInvalid from error
+    return OverviewFilters(
+        scheduled_from=filters.scheduled_from,
+        scheduled_before=filters.scheduled_before,
+        actual_headcount_min=filters.actual_headcount_min,
+        actual_headcount_max=filters.actual_headcount_max,
+        actual_play_mode=actual_play_mode,
+    )
+
+
+def _overview_parameters(
+    workspace_id: UUID, work_id: UUID, filters: OverviewFilters
+) -> dict[str, object]:
+    return {
+        "workspace_id": workspace_id,
+        "work_id": work_id,
+        "scheduled_from": filters.scheduled_from,
+        "scheduled_before": filters.scheduled_before,
+        "actual_headcount_min": filters.actual_headcount_min,
+        "actual_headcount_max": filters.actual_headcount_max,
+        "actual_play_mode": filters.actual_play_mode,
+    }
+
+
+def read_overview(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    filters: OverviewFilters,
+) -> OverviewData:
+    filters = _validated_overview_filters(filters)
+    try:
+        _require_overview(session, actor_id, workspace_id, work_id)
+        payload = session.scalar(
+            text(
+                "SELECT public.playtest_overview_summary("
+                ":workspace_id, :work_id, :scheduled_from, :scheduled_before, "
+                ":actual_headcount_min, :actual_headcount_max, :actual_play_mode)"
+            ),
+            _overview_parameters(workspace_id, work_id, filters),
+        )
+        if not isinstance(payload, dict):
+            raise PlaytestOperationRetryable
+        coverage = tuple(
+            HeadcountCoverageData(
+                actual_headcount=item["actual_headcount"],
+                completed_count=item["completed_count"],
+                interrupted_count=item["interrupted_count"],
+                unrecorded_completion_count=item["unrecorded_completion_count"],
+                temporary_variant_count=item["temporary_variant_count"],
+            )
+            for item in payload["headcount_coverage"]
+        )
+    except (
+        PlaytestOverviewInvalid,
+        PlaytestOverviewUnavailable,
+        PlaytestOperationRetryable,
+    ):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+    return OverviewData(
+        filters=filters,
+        included_session_count=payload["included_session_count"],
+        missing_actual_headcount_count=payload["missing_actual_headcount_count"],
+        missing_actual_duration_count=payload["missing_actual_duration_count"],
+        missing_completion_status_count=payload["missing_completion_status_count"],
+        missing_actual_play_mode_count=payload["missing_actual_play_mode_count"],
+        temporary_variant_count=payload["temporary_variant_count"],
+        headcount_coverage=coverage,
+        play_modes=tuple(payload["play_modes"]),
+    )
+
+
+def list_overview_sessions(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    filters: OverviewFilters,
+    page: int,
+    size: int,
+) -> tuple[list[OverviewSessionData], int]:
+    filters = _validated_overview_filters(filters)
+    try:
+        _require_overview(session, actor_id, workspace_id, work_id)
+        rows = list(
+            session.execute(
+                text(
+                    "SELECT * FROM public.playtest_overview_sessions("
+                    ":workspace_id, :work_id, :scheduled_from, :scheduled_before, "
+                    ":actual_headcount_min, :actual_headcount_max, :actual_play_mode, "
+                    ":page, :size)"
+                ),
+                _overview_parameters(workspace_id, work_id, filters)
+                | {"page": page, "size": size},
+            ).mappings()
+        )
+    except (
+        PlaytestOverviewInvalid,
+        PlaytestOverviewUnavailable,
+        PlaytestOperationRetryable,
+    ):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+    return (
+        [
+            OverviewSessionData(
+                id=row["id"],
+                scheduled_at=row["scheduled_at"],
+                actual_headcount=row["actual_headcount"],
+                actual_duration_minutes=row["actual_duration_minutes"],
+                completion_status=row["completion_status"],
+                actual_play_mode=row["actual_play_mode"],
+                has_temporary_variant=row["has_temporary_variant"],
+            )
+            for row in rows
+        ],
+        int(rows[0]["total"]) if rows else 0,
+    )
+
+
+def list_overview_issues(
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    kind: str,
+    page: int,
+    size: int,
+) -> tuple[list[issues_service.OverviewIssueData], int]:
+    if kind not in {"pending-retest", "needs-action"}:
+        raise PlaytestOverviewInvalid
+    try:
+        _require_overview(session, actor_id, workspace_id, work_id)
+        rows = list(
+            session.execute(
+                text(
+                    "SELECT * FROM public.playtest_overview_issues("
+                    ":workspace_id, :work_id, :kind, :page, :size)"
+                ),
+                {
+                    "workspace_id": workspace_id,
+                    "work_id": work_id,
+                    "kind": kind,
+                    "page": page,
+                    "size": size,
+                },
+            ).mappings()
+        )
+    except (
+        PlaytestOverviewInvalid,
+        PlaytestOverviewUnavailable,
+        PlaytestOperationRetryable,
+    ):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise PlaytestOperationRetryable from error
+    return (
+        [
+            issues_service.OverviewIssueData(
+                id=row["id"],
+                description=row["description"],
+                decision=row["decision"],
+                status=row["status"],
+                verification_status=row["verification_status"],
+                current_conclusion_type=row["current_conclusion_type"],
+                current_conclusion_session_id=row["current_conclusion_session_id"],
+            )
+            for row in rows
+        ],
+        int(rows[0]["total"]) if rows else 0,
+    )
 
 
 def list_plans(
@@ -1089,6 +1366,7 @@ def _result_data(session: Session, item: PlaytestSession) -> ResultData:
         actual_headcount=item.actual_headcount,
         actual_duration_minutes=item.actual_duration_minutes,
         completion_status=item.completion_status,
+        actual_play_mode=item.actual_play_mode,
         material_candidates=tuple(
             MaterialData(
                 id=file.id,
@@ -1142,6 +1420,7 @@ def _validate_result_draft(
         raise PlaytestResultInvalid
     if draft.completion_status not in {None, "completed", "interrupted"}:
         raise PlaytestResultInvalid
+    actual_play_mode = _optional_text(draft.actual_play_mode, 160)
 
     participant_ids = set(
         session.scalars(
@@ -1224,6 +1503,7 @@ def _validate_result_draft(
         completion_status=draft.completion_status,
         actual_material=actual_material,
         actual_participants=tuple(actual_participants),
+        actual_play_mode=actual_play_mode,
     )
 
 
@@ -1283,6 +1563,7 @@ def save_result(
         item.actual_headcount = draft.actual_headcount
         item.actual_duration_minutes = draft.actual_duration_minutes
         item.completion_status = draft.completion_status
+        item.actual_play_mode = draft.actual_play_mode
         item.actual_material_recorded = draft.actual_material is not None
         item.actual_rule_name = (
             draft.actual_material.rule_name

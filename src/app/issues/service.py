@@ -2,9 +2,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, literal, or_, select
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from app.access.context import (
     set_actor,
@@ -100,6 +100,17 @@ class IssueData:
     created_at: datetime
     updated_at: datetime
     source_count: int
+
+
+@dataclass(frozen=True)
+class OverviewIssueData:
+    id: UUID
+    description: str
+    decision: str
+    status: str
+    verification_status: str
+    current_conclusion_type: str | None
+    current_conclusion_session_id: UUID | None
 
 
 @dataclass(frozen=True)
@@ -357,6 +368,81 @@ def list_issues(
         session.rollback()
         raise IssueOperationRetryable from error
     return [_data(session, issue, source_count) for issue, source_count in rows], total
+
+
+def list_overview_issues(
+    session: Session,
+    workspace_id: UUID,
+    work_id: UUID,
+    kind: str,
+    page: int,
+    size: int,
+) -> tuple[list[OverviewIssueData], int]:
+    if kind not in {"pending-retest", "needs-action"}:
+        raise IssueInvalid
+    current_link = aliased(IssueRetestLink)
+    current_link_condition = (
+        (current_link.issue_id == Issue.id)
+        & (current_link.adjustment_generation == Issue.adjustment_generation)
+        & current_link.conclusion.is_not(None)
+    )
+    pending_retest = Issue.adjustment_note.is_not(None) & current_link.conclusion.is_(
+        None
+    )
+    verification_status = case(
+        (current_link.conclusion.is_not(None), current_link.conclusion),
+        (Issue.adjustment_note.is_not(None), literal("pending")),
+        else_=literal("not_recorded"),
+    ).label("verification_status")
+    conditions = [
+        Issue.workspace_id == workspace_id,
+        Issue.work_id == work_id,
+        Issue.status == "open",
+        pending_retest
+        if kind == "pending-retest"
+        else or_(Issue.adjustment_note.is_(None), current_link.conclusion.is_not(None)),
+    ]
+    try:
+        total = (
+            session.scalar(
+                select(func.count())
+                .select_from(Issue)
+                .outerjoin(current_link, current_link_condition)
+                .where(*conditions)
+            )
+            or 0
+        )
+        rows = session.execute(
+            select(
+                Issue.id,
+                Issue.description,
+                Issue.decision,
+                Issue.status,
+                verification_status,
+                current_link.conclusion,
+                current_link.session_id,
+            )
+            .outerjoin(current_link, current_link_condition)
+            .where(*conditions)
+            .order_by(Issue.updated_at.desc(), Issue.id.desc())
+            .offset((page - 1) * size)
+            .limit(size)
+        )
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise IssueOperationRetryable from error
+    return [
+        OverviewIssueData(
+            id=row.id,
+            description=row.description,
+            decision=row.decision,
+            status=row.status,
+            verification_status=row.verification_status,
+            current_conclusion_type=row.conclusion,
+            current_conclusion_session_id=row.session_id,
+        )
+        for row in rows
+    ], total
 
 
 def create_issue(

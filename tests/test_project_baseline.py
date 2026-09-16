@@ -85,13 +85,18 @@ def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID, tuple[UUID, ...]]:
         assert len(sessions) == 2
         assert {item.completion_status for item in sessions} == {"completed"}
         assert {item.actual_headcount for item in sessions} == {1}
+        assert {item.actual_play_mode for item in sessions} == {
+            "实体桌游",
+            "规则补充复测",
+        }
         assert len(participants) == 2
         assert len(actual_materials) == 4
         assert len(actual_participants) == 2
-        assert len(observations) == 3
+        assert len(observations) == 4
         assert {item.kind for item in observations} == {
             "fact",
             "organizer_interpretation",
+            "temporary_variant",
         }
         assert len(feedback_items) == 3
         assert len(feedback_submissions) == 2

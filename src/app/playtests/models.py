@@ -145,6 +145,7 @@ class PlaytestSession(Base):
     actual_headcount: Mapped[int | None] = mapped_column(Integer)
     actual_duration_minutes: Mapped[int | None] = mapped_column(Integer)
     completion_status: Mapped[str | None] = mapped_column(String(16))
+    actual_play_mode: Mapped[str | None] = mapped_column(String(160))
     actual_material_recorded: Mapped[bool] = mapped_column(
         nullable=False, default=False
     )
