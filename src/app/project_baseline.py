@@ -38,7 +38,7 @@ from app.identity.models import (
 from app.issues import service as issues_service
 from app.issues.models import Issue, IssueEvidenceLink, IssueRetestLink
 from app.notifications import dispatcher as mail_dispatcher
-from app.notifications.models import MailOutbox
+from app.notifications.models import MailOutbox, NotificationTodo
 from app.playtests import service as playtests_service
 from app.playtests.models import (
     PlaytestPlan,
@@ -151,6 +151,7 @@ def _record_count(session: Session) -> int:
         AttemptRecord,
         RecoveryRequestJob,
         MailOutbox,
+        NotificationTodo,
         SecurityAudit,
         Workspace,
         WorkspaceMember,
@@ -210,6 +211,7 @@ def _baseline_counts() -> dict[str, int]:
         "issues": 4,
         "issue_evidence_links": 7,
         "issue_retest_links": 1,
+        "notification_todos": 9,
     }
 
 
@@ -362,10 +364,10 @@ def initialize(session: Session, operator: str, reason: str) -> BaselineResult:
                 ),
             ),
         )
+        mail_dispatcher.dispatch_one(session)
         playtests_service.confirm_participation(
             session, playtester.id, plan.sessions[0].id
         )
-        mail_dispatcher.dispatch_one(session)
 
         first_started = playtests_service.start_session(
             session,
@@ -789,6 +791,7 @@ def _clear_database(session: Session) -> int:
         WorkspaceMember,
         WorkspaceInvitationAttempt,
         Workspace,
+        NotificationTodo,
         MailOutbox,
         OneTimeCredential,
         SessionRecord,

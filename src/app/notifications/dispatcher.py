@@ -5,15 +5,18 @@ from datetime import UTC, datetime, timedelta
 from email.message import EmailMessage
 from uuid import UUID, uuid4
 
-from sqlalchemy import select, update
+from sqlalchemy import exists, or_, select, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from app.access.context import set_invitation_credential
+from app.access.context import (
+    set_invitation_credential,
+    set_notification_todo_dispatch_scope,
+)
 from app.core.config import settings
 from app.identity.models import Account, OneTimeCredential
-from app.notifications.models import MailOutbox
-from app.notifications.service import decrypt_token
+from app.notifications.models import MailOutbox, NotificationTodo
+from app.notifications.service import business_todo_eligible, decrypt_token
 from app.workspaces.models import WorkspaceInvitation
 
 
@@ -130,23 +133,60 @@ def _claim_next(session: Session) -> DispatchClaim | None:
 
 
 def _load_claim(session: Session, claim: DispatchClaim) -> MailOutbox | None:
-    statement = select(MailOutbox).where(
-        MailOutbox.id == claim.outbox_id,
-        MailOutbox.status == "sending",
-        MailOutbox.claim_id == claim.claim_id,
+    outbox = session.scalar(
+        select(MailOutbox).where(
+            MailOutbox.id == claim.outbox_id,
+            MailOutbox.status == "sending",
+            MailOutbox.claim_id == claim.claim_id,
+        )
     )
-    outbox = session.scalar(statement)
     if outbox is None:
         session.rollback()
-        return None
-    if outbox.credential_id is not None:
-        outbox = session.scalar(statement.with_for_update())
-        if outbox is None:
-            session.rollback()
     return outbox
 
 
+def _associated_todo_is_open(session: Session, outbox: MailOutbox) -> bool:
+    if outbox.todo_id is None:
+        return True
+    set_notification_todo_dispatch_scope(session, outbox.todo_id)
+    todo = session.scalar(
+        select(NotificationTodo).where(NotificationTodo.id == outbox.todo_id)
+    )
+    return todo is not None and todo.status == "open"
+
+
+def _business_todo_is_eligible(session: Session, outbox: MailOutbox) -> bool:
+    if outbox.todo_id is None:
+        return True
+    set_notification_todo_dispatch_scope(session, outbox.todo_id)
+    todo = session.scalar(
+        select(NotificationTodo).where(NotificationTodo.id == outbox.todo_id)
+    )
+    return todo is not None and business_todo_eligible(session, todo)
+
+
 def _start_smtp(session: Session, claim: DispatchClaim) -> bool:
+    todo_open = exists(
+        select(NotificationTodo.id).where(
+            NotificationTodo.id == MailOutbox.todo_id,
+            NotificationTodo.status == "open",
+        )
+    )
+    credential_available = exists(
+        select(OneTimeCredential.id).where(
+            OneTimeCredential.id == MailOutbox.credential_id,
+            OneTimeCredential.purpose == MailOutbox.purpose,
+            OneTimeCredential.status == "active",
+            OneTimeCredential.expires_at > _now(),
+        )
+    )
+    invitation_available = exists(
+        select(WorkspaceInvitation.id).where(
+            WorkspaceInvitation.credential_id == MailOutbox.credential_id,
+            WorkspaceInvitation.account_id == MailOutbox.recipient_account_id,
+            WorkspaceInvitation.status == "active",
+        )
+    )
     result = session.execute(
         update(MailOutbox)
         .where(
@@ -154,6 +194,12 @@ def _start_smtp(session: Session, claim: DispatchClaim) -> bool:
             MailOutbox.status == "sending",
             MailOutbox.claim_id == claim.claim_id,
             MailOutbox.smtp_started_at.is_(None),
+            or_(MailOutbox.todo_id.is_(None), todo_open),
+            or_(MailOutbox.credential_id.is_(None), credential_available),
+            or_(
+                MailOutbox.purpose != "workspace_invitation",
+                invitation_available,
+            ),
         )
         .values(smtp_started_at=_now())
     )
@@ -188,6 +234,14 @@ def _mark_ineligible(session: Session, claim: DispatchClaim) -> bool:
             "token_nonce": None,
             "key_version": None,
         },
+    )
+
+
+def _mark_business_ineligible(session: Session, claim: DispatchClaim) -> bool:
+    return _update_claim(
+        session,
+        claim,
+        {"status": "cancelled", "last_error_code": "business_unavailable"},
     )
 
 
@@ -248,6 +302,15 @@ def _dispatch_one(session: Session) -> str | None:
     outbox = _load_claim(session, claim)
     if outbox is None:
         return "superseded"
+    if not _associated_todo_is_open(session, outbox):
+        if outbox.credential_id is None:
+            _mark_business_ineligible(session, claim)
+        else:
+            _mark_ineligible(session, claim)
+        return "cancelled"
+    if outbox.credential_id is None and not _business_todo_is_eligible(session, outbox):
+        _mark_business_ineligible(session, claim)
+        return "cancelled"
     account = session.get(Account, outbox.recipient_account_id)
     if outbox.credential_id is None:
         if (
@@ -261,17 +324,17 @@ def _dispatch_one(session: Session) -> str | None:
         subject, body = outbox.frozen_subject, outbox.frozen_body
     else:
         credential = session.scalar(
-            select(OneTimeCredential)
-            .where(OneTimeCredential.id == outbox.credential_id)
-            .with_for_update()
+            select(OneTimeCredential).where(
+                OneTimeCredential.id == outbox.credential_id
+            )
         )
         invitation: WorkspaceInvitation | None = None
         if credential is not None and outbox.purpose == "workspace_invitation":
             set_invitation_credential(session, credential.id)
             invitation = session.scalar(
-                select(WorkspaceInvitation)
-                .where(WorkspaceInvitation.credential_id == credential.id)
-                .with_for_update()
+                select(WorkspaceInvitation).where(
+                    WorkspaceInvitation.credential_id == credential.id
+                )
             )
         if (
             credential is None

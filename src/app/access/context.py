@@ -4,7 +4,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 
-def _set_scope(session: Session, name: str, value: UUID) -> None:
+def _set_scope(session: Session, name: str, value: UUID | str) -> None:
     session.execute(
         text("SELECT set_config(:name, :value, true)"),
         {"name": name, "value": str(value)},
@@ -17,6 +17,36 @@ def set_actor(session: Session, account_id: UUID) -> None:
 
 def set_invitation_credential(session: Session, credential_id: UUID) -> None:
     _set_scope(session, "app.invitation_credential_id", credential_id)
+
+
+def set_workspace_invitation_inbox_scope(session: Session, invitation_id: UUID) -> None:
+    _set_scope(session, "app.workspace_invitation_inbox_id", invitation_id)
+
+
+def set_notification_todo_source_scope(
+    session: Session, recipient_id: UUID, kind: str, source_key: str
+) -> None:
+    _set_scope(session, "app.notification_todo_recipient_id", recipient_id)
+    _set_scope(session, "app.notification_todo_kind", kind)
+    _set_scope(session, "app.notification_todo_source_key", source_key)
+
+
+def set_notification_todo_target_scope(
+    session: Session, target_kind: str, target_id: UUID
+) -> None:
+    _set_scope(session, "app.notification_todo_target_kind", target_kind)
+    _set_scope(session, "app.notification_todo_target_id", target_id)
+
+
+def set_notification_todo_work_cleanup_scope(
+    session: Session, recipient_id: UUID, work_id: UUID
+) -> None:
+    _set_scope(session, "app.notification_todo_cleanup_recipient_id", recipient_id)
+    _set_scope(session, "app.notification_todo_cleanup_work_id", work_id)
+
+
+def set_notification_todo_dispatch_scope(session: Session, todo_id: UUID) -> None:
+    _set_scope(session, "app.notification_todo_dispatch_id", todo_id)
 
 
 def set_workspace_management_scope(session: Session, workspace_id: UUID) -> None:

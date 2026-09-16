@@ -23,7 +23,7 @@ from app.identity.models import Account
 from app.issues import service as issues_service
 from app.issues.models import IssueEvidenceLink
 from app.notifications import dispatcher
-from app.notifications.models import MailOutbox
+from app.notifications.models import MailOutbox, NotificationTodo
 from app.notifications.service import enqueue_business_mail, suppress_business_mails
 from app.playtests import service as playtests_service
 from app.playtests.models import (
@@ -835,6 +835,17 @@ def test_feedback_keeps_drafts_private_locks_items_and_updates_current_answers(
         )
         assert [submission.id for submission in manager_view.feedback.submissions] == [
             draft.id
+        ]
+        set_actor(session, owner)
+        feedback_todos = list(
+            session.scalars(
+                select(NotificationTodo).where(
+                    NotificationTodo.kind == "feedback_submitted"
+                )
+            )
+        )
+        assert [(todo.target_kind, todo.target_id) for todo in feedback_todos] == [
+            ("playtest_session", session_id)
         ]
         organizer_submission = playtests_service.create_feedback_submission(
             session,

@@ -14,17 +14,25 @@ from app.access.context import (
     set_playtest_management_scope,
     set_playtest_participant_lookup_scope,
     set_playtest_session_scope,
+    set_work_management_scope,
 )
 from app.core.config import settings
 from app.evidence import service as evidence_service
+from app.evidence.models import PlaytestFeedbackSubmission
 from app.files import materials as file_materials
 from app.files import service as files_service
 from app.files.models import StoredFile
 from app.identity import service as identity_service
 from app.identity.models import Account
 from app.issues import service as issues_service
-from app.notifications.models import MailOutbox
-from app.notifications.service import enqueue_business_mail, suppress_business_mails
+from app.notifications.models import MailOutbox, NotificationTodo
+from app.notifications.service import (
+    cancel_todos_for_target,
+    complete_todo_by_source,
+    create_todo,
+    enqueue_business_mail,
+    suppress_business_mails,
+)
 from app.playtests.models import (
     PlaytestPlan,
     PlaytestSession,
@@ -34,6 +42,7 @@ from app.playtests.models import (
     PlaytestSessionParticipant,
 )
 from app.works import service as works_service
+from app.workspaces import service as workspaces_service
 
 SCHEDULED = "scheduled"
 STARTED = "started"
@@ -557,6 +566,54 @@ def _mail_content(work_name: str, purpose: str, session_id: UUID) -> tuple[str, 
     return subject, f"{action}《{work_name}》。请登录 Rulefolio 查看本场安排：\n{link}"
 
 
+def notification_todo_eligible(session: Session, todo: NotificationTodo) -> bool:
+    if todo.target_kind != "playtest_session":
+        return False
+    set_actor(session, todo.recipient_account_id)
+    set_playtest_participant_lookup_scope(session, todo.target_id)
+    participant = session.scalar(
+        select(PlaytestSessionParticipant).where(
+            PlaytestSessionParticipant.session_id == todo.target_id,
+            PlaytestSessionParticipant.account_id == todo.recipient_account_id,
+        )
+    )
+    if participant is None:
+        return False
+    set_playtest_session_scope(session, todo.target_id)
+    item = session.scalar(
+        select(PlaytestSession).where(PlaytestSession.id == todo.target_id)
+    )
+    if item is None:
+        return False
+    return (
+        item.status == CANCELLED
+        if todo.kind == "playtest_cancelled"
+        else item.status == SCHEDULED
+    )
+
+
+def _todo_details(
+    item: PlaytestSession, purpose: str, participant_id: UUID
+) -> tuple[str, str, str]:
+    if purpose == "playtest_invitation":
+        return "playtest_invitation", str(participant_id), "确认试玩邀请"
+    if purpose == "playtest_arrangement_updated":
+        return (
+            "playtest_arrangement_updated",
+            f"{item.id}:revision:{item.revision}",
+            "查看场次安排变更",
+        )
+    if purpose == "playtest_material_updated":
+        return (
+            "playtest_material_updated",
+            f"{item.id}:revision:{item.revision}",
+            "查看场次材料更新",
+        )
+    if purpose == "playtest_cancelled":
+        return "playtest_cancelled", str(participant_id), "查看场次取消说明"
+    raise ValueError("不支持的试玩待办用途")
+
+
 def _notify_participants(session: Session, item: PlaytestSession, purpose: str) -> None:
     set_playtest_session_scope(session, item.id)
     participants = list(
@@ -568,15 +625,61 @@ def _notify_participants(session: Session, item: PlaytestSession, purpose: str) 
     )
     subject, body = _mail_content(item.work_name, purpose, item.id)
     for participant in participants:
-        outbox = enqueue_business_mail(
+        kind, source_key, summary = _todo_details(item, purpose, participant.id)
+        todo, created = create_todo(
             session,
-            participant.account_id,
-            purpose,
-            subject,
-            body,
-            business_scope=_business_scope(item.id),
+            recipient_account_id=participant.account_id,
+            workspace_id=item.workspace_id,
+            work_id=item.work_id,
+            kind=kind,
+            target_kind="playtest_session",
+            target_id=item.id,
+            source_key=source_key,
+            summary=summary,
+            context_label=f"作品：{item.work_name}",
         )
-        participant.latest_outbox_id = outbox.id
+        if created:
+            outbox = enqueue_business_mail(
+                session,
+                participant.account_id,
+                purpose,
+                subject,
+                body,
+                business_scope=_business_scope(item.id),
+                todo_id=todo.id,
+            )
+            participant.latest_outbox_id = outbox.id
+
+
+def _notify_feedback_maintainers(
+    session: Session, item: PlaytestSession, submission_id: UUID
+) -> None:
+    set_work_management_scope(session, item.work_id, item.workspace_id)
+    for account_id in workspaces_service.current_work_maintainer_ids(
+        session, item.work_id
+    ):
+        todo, created = create_todo(
+            session,
+            recipient_account_id=account_id,
+            workspace_id=item.workspace_id,
+            work_id=item.work_id,
+            kind="feedback_submitted",
+            target_kind="playtest_session",
+            target_id=item.id,
+            source_key=str(submission_id),
+            summary="有新的试玩反馈需要处理",
+            context_label=f"作品：{item.work_name}",
+        )
+        if created:
+            enqueue_business_mail(
+                session,
+                account_id,
+                "feedback_submitted",
+                "有新的试玩反馈需要处理",
+                f"《{item.work_name}》有新的试玩反馈，请登录 Rulefolio 查看。",
+                business_scope=f"feedback-submission:{submission_id}",
+                todo_id=todo.id,
+            )
 
 
 def _create_session(
@@ -623,21 +726,11 @@ def _create_session(
     session.flush()
     set_playtest_session_scope(session, item.id)
     for account in participants:
-        participant = PlaytestSessionParticipant(
-            session_id=item.id, account_id=account.id
+        session.add(
+            PlaytestSessionParticipant(session_id=item.id, account_id=account.id)
         )
-        session.add(participant)
-        session.flush()
-        subject, body = _mail_content(item.work_name, "playtest_invitation", item.id)
-        outbox = enqueue_business_mail(
-            session,
-            account.id,
-            "playtest_invitation",
-            subject,
-            body,
-            business_scope=_business_scope(item.id),
-        )
-        participant.latest_outbox_id = outbox.id
+    session.flush()
+    _notify_participants(session, item, "playtest_invitation")
     session.add_all(
         PlaytestSessionMaterial(session_id=item.id, file_id=file.id, sha256=file.sha256)
         for file in snapshot.materials
@@ -1131,6 +1224,12 @@ def update_arrangement(
         item.location = location
         item.capacity = capacity
         item.revision += 1
+        cancel_todos_for_target(
+            session,
+            "playtest_session",
+            item.id,
+            kinds={"playtest_arrangement_updated"},
+        )
         _notify_participants(session, item, "playtest_arrangement_updated")
         _commit_or_rollback(session)
     except (
@@ -1197,6 +1296,12 @@ def replace_materials(
                 session_id=item.id, file_id=file.id, sha256=file.sha256
             )
             for file in snapshot.materials
+        )
+        cancel_todos_for_target(
+            session,
+            "playtest_session",
+            item.id,
+            kinds={"playtest_material_updated"},
         )
         _notify_participants(session, item, "playtest_material_updated")
         _commit_or_rollback(session)
@@ -1275,6 +1380,19 @@ def cancel_session(
         item.status = CANCELLED
         item.revision += 1
         suppress_business_mails(session, _business_scope(item.id))
+        cancel_todos_for_target(
+            session,
+            "playtest_session",
+            item.id,
+            kinds={
+                "playtest_invitation",
+                "playtest_arrangement_updated",
+                "playtest_material_updated",
+            },
+        )
+        issues_service.cancel_retest_arranged_for_session(
+            session, workspace_id, work_id, item.id
+        )
         _notify_participants(session, item, "playtest_cancelled")
         _commit_or_rollback(session)
     except (
@@ -1854,6 +1972,12 @@ def confirm_participation(
             session.rollback()
             raise PlaytestCapacityExceeded
         participant.status = CONFIRMED
+        complete_todo_by_source(
+            session,
+            actor_id,
+            "playtest_invitation",
+            str(participant.id),
+        )
         _commit_or_rollback(session)
         return ConfirmationData(CONFIRMED, confirmed_count + 1, item.capacity)
     except (
@@ -2066,9 +2190,17 @@ def create_feedback_submission(
             session, actor_id, workspace_id, work_id, session_id, lock=True
         )
         _require_feedback_mutable(item, session)
+        existing = session.scalar(
+            select(PlaytestFeedbackSubmission.id).where(
+                PlaytestFeedbackSubmission.session_id == item.id,
+                PlaytestFeedbackSubmission.creation_operation_key == operation_key,
+            )
+        )
         result = evidence_service.create_organizer_submission(
             session, item.id, actor_id, operation_key, draft
         )
+        if existing is None:
+            _notify_feedback_maintainers(session, item, result.id)
         _commit_or_rollback(session)
         return result
     except (
@@ -2140,6 +2272,13 @@ def save_participant_feedback(
             session.rollback()
             raise PlaytestSessionStateInvalid
         set_feedback_participant_scope(session, item.id)
+        previous = session.scalar(
+            select(PlaytestFeedbackSubmission).where(
+                PlaytestFeedbackSubmission.session_id == item.id,
+                PlaytestFeedbackSubmission.direct_author_account_id == actor_id,
+            )
+        )
+        was_submitted = previous is not None and previous.status == "submitted"
         result = evidence_service.save_direct_submission(
             session,
             item.id,
@@ -2148,6 +2287,8 @@ def save_participant_feedback(
             expected_revision,
             draft,
         )
+        if result.status == "submitted" and not was_submitted:
+            _notify_feedback_maintainers(session, item, result.id)
         _commit_or_rollback(session)
         return result
     except IntegrityError as error:

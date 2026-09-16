@@ -19,7 +19,7 @@ from app.files.models import StoredFile
 from app.identity import service as identity_service
 from app.identity.models import Account, OneTimeCredential, SessionRecord
 from app.issues.models import Issue, IssueEvidenceLink, IssueRetestLink
-from app.notifications.models import MailOutbox
+from app.notifications.models import MailOutbox, NotificationTodo
 from app.playtests.models import (
     PlaytestPlan,
     PlaytestSession,
@@ -144,8 +144,11 @@ def _baseline_state() -> tuple[str, UUID, UUID, UUID, UUID, tuple[UUID, ...]]:
             material.id for material in materials
         }
         assert session.scalar(select(func.count()).select_from(OneTimeCredential)) == 0
+        todos = list(session.scalars(select(NotificationTodo)))
+        assert len(todos) == 9
+        assert {todo.status for todo in todos} >= {"open", "completed"}
         outbox_statuses = list(session.scalars(select(MailOutbox.status)))
-        assert len(outbox_statuses) == 2
+        assert len(outbox_statuses) >= 9
         assert any(
             status in {"accepted", "failed", "unknown", "pending"}
             for status in outbox_statuses

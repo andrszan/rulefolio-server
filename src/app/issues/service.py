@@ -13,9 +13,18 @@ from app.access.context import (
 )
 from app.evidence import service as evidence_service
 from app.issues.models import Issue, IssueEvidenceLink, IssueRetestLink
+from app.notifications.models import NotificationTodo
+from app.notifications.service import (
+    cancel_todo_by_source,
+    cancel_todos_for_target,
+    complete_todos_for_target,
+    create_todo,
+    enqueue_business_mail,
+)
 from app.playtests.models import PlaytestSession
 from app.works import service as works_service
 from app.works.models import Work
+from app.workspaces import service as workspaces_service
 
 DECISIONS = frozenset({"modify", "observe", "reject"})
 STATUSES = frozenset({"open", "closed"})
@@ -328,6 +337,166 @@ def _lock_work_for_creation(
         raise IssueUnavailable
 
 
+def notification_todo_eligible(session: Session, todo: NotificationTodo) -> bool:
+    if todo.work_id is None:
+        return False
+    work_id = todo.work_id
+    workspace_id = todo.workspace_id
+    recipient_account_id = todo.recipient_account_id
+    kind = todo.kind
+    target_kind = todo.target_kind
+    target_id = todo.target_id
+    set_work_management_scope(session, work_id, workspace_id)
+    if recipient_account_id not in workspaces_service.current_work_maintainer_ids(
+        session, work_id
+    ):
+        return False
+    if kind == "feedback_submitted":
+        return target_kind == "playtest_session"
+    if kind in {"issue_opened", "retest_arrangement_needed"}:
+        issue = session.scalar(
+            select(Issue).where(
+                Issue.id == target_id,
+                Issue.workspace_id == workspace_id,
+                Issue.work_id == work_id,
+                Issue.status == "open",
+            )
+        )
+        return issue is not None
+    if kind == "retest_arranged" and target_kind == "issue":
+        try:
+            link_id = UUID(todo.source_key)
+        except ValueError:
+            return False
+        set_playtest_management_scope(session, workspace_id, work_id)
+        link = session.scalar(
+            select(IssueRetestLink)
+            .join(PlaytestSession, PlaytestSession.id == IssueRetestLink.session_id)
+            .where(
+                IssueRetestLink.id == link_id,
+                IssueRetestLink.issue_id == target_id,
+                PlaytestSession.workspace_id == workspace_id,
+                PlaytestSession.work_id == work_id,
+                PlaytestSession.status != "cancelled",
+            )
+        )
+        return link is not None
+    return False
+
+
+def _notify_issue_maintainers(session: Session, issue: Issue) -> None:
+    source_key = f"{issue.id}:open:{issue.revision}"
+    for account_id in workspaces_service.current_work_maintainer_ids(
+        session, issue.work_id
+    ):
+        todo, created = create_todo(
+            session,
+            recipient_account_id=account_id,
+            workspace_id=issue.workspace_id,
+            work_id=issue.work_id,
+            kind="issue_opened",
+            target_kind="issue",
+            target_id=issue.id,
+            source_key=source_key,
+            summary="有新的问题需要处理",
+            context_label=f"问题：{issue.description[:197]}",
+        )
+        if created:
+            enqueue_business_mail(
+                session,
+                account_id,
+                "issue_opened",
+                "有新的问题需要处理",
+                "有新的作品问题需要处理，请登录 Rulefolio 查看。",
+                business_scope=f"issue:{issue.id}",
+                todo_id=todo.id,
+            )
+
+
+def _notify_retest_needed(session: Session, issue: Issue) -> None:
+    source_key = f"{issue.id}:adjustment:{issue.adjustment_generation}"
+    for account_id in workspaces_service.current_work_maintainer_ids(
+        session, issue.work_id
+    ):
+        todo, created = create_todo(
+            session,
+            recipient_account_id=account_id,
+            workspace_id=issue.workspace_id,
+            work_id=issue.work_id,
+            kind="retest_arrangement_needed",
+            target_kind="issue",
+            target_id=issue.id,
+            source_key=source_key,
+            summary="需要安排针对性复测",
+            context_label=f"问题：{issue.description[:197]}",
+        )
+        if created:
+            enqueue_business_mail(
+                session,
+                account_id,
+                "retest_arrangement_needed",
+                "需要安排针对性复测",
+                "作品问题的当前调整需要安排针对性复测，请登录 Rulefolio 查看。",
+                business_scope=f"issue-retest-needed:{issue.id}:{issue.adjustment_generation}",
+                todo_id=todo.id,
+            )
+
+
+def _notify_retest_arranged(
+    session: Session, issue: Issue, link: IssueRetestLink, creator_id: UUID
+) -> None:
+    for account_id in workspaces_service.current_work_maintainer_ids(
+        session, issue.work_id
+    ):
+        if account_id == creator_id:
+            continue
+        todo, created = create_todo(
+            session,
+            recipient_account_id=account_id,
+            workspace_id=issue.workspace_id,
+            work_id=issue.work_id,
+            kind="retest_arranged",
+            target_kind="issue",
+            target_id=issue.id,
+            source_key=str(link.id),
+            summary="已安排针对性复测",
+            context_label=f"问题：{issue.description[:197]}",
+        )
+        if created:
+            enqueue_business_mail(
+                session,
+                account_id,
+                "retest_arranged",
+                "已安排针对性复测",
+                "其他维护者已安排针对性复测，请登录 Rulefolio 查看。",
+                business_scope=f"issue-retest:{link.id}",
+                todo_id=todo.id,
+            )
+
+
+def cancel_retest_arranged_for_session(
+    session: Session, workspace_id: UUID, work_id: UUID, session_id: UUID
+) -> None:
+    set_work_management_scope(session, work_id, workspace_id)
+    links = list(
+        session.scalars(
+            select(IssueRetestLink)
+            .join(Issue, Issue.id == IssueRetestLink.issue_id)
+            .where(
+                IssueRetestLink.session_id == session_id,
+                Issue.workspace_id == workspace_id,
+                Issue.work_id == work_id,
+            )
+        )
+    )
+    recipient_ids = workspaces_service.current_work_maintainer_ids(session, work_id)
+    for link in links:
+        for recipient_id in recipient_ids:
+            cancel_todo_by_source(
+                session, recipient_id, "retest_arranged", str(link.id)
+            )
+
+
 def list_issues(
     session: Session,
     actor_id: UUID,
@@ -499,6 +668,8 @@ def create_issue(
         session.add(issue)
         session.flush()
         _add_links(session, issue.id, references)
+        if issue.status == "open":
+            _notify_issue_maintainers(session, issue)
         _commit_or_rollback(session)
     except evidence_service.IssueEvidenceInvalid as error:
         session.rollback()
@@ -563,6 +734,7 @@ def update_issue(
         if issue.revision != expected_revision:
             session.rollback()
             raise IssueRevisionConflict
+        was_open = issue.status == "open"
         adjustment_changed = adjustment_note != issue.adjustment_note
         issue.description = description
         issue.decision = decision
@@ -582,6 +754,27 @@ def update_issue(
                 link.conclusion_reason = None
                 link.updated_at = _now()
         session.flush()
+        if issue.status == "closed":
+            complete_todos_for_target(
+                session, "issue", issue.id, kinds={"issue_opened"}
+            )
+            cancel_todos_for_target(
+                session, "issue", issue.id, kinds={"retest_arrangement_needed"}
+            )
+        else:
+            if not was_open:
+                _notify_issue_maintainers(session, issue)
+            if adjustment_changed:
+                cancel_todos_for_target(
+                    session,
+                    "issue",
+                    issue.id,
+                    kinds={"retest_arrangement_needed"},
+                )
+            if issue.adjustment_note is not None and (
+                adjustment_changed or not was_open
+            ):
+                _notify_retest_needed(session, issue)
         source_count = _source_count(session, issue.id)
         _commit_or_rollback(session)
     except (
@@ -639,6 +832,13 @@ def bind_retest_session(
         issue.revision += 1
         issue.updated_at = _now()
         session.flush()
+        complete_todos_for_target(
+            session,
+            "issue",
+            issue.id,
+            kinds={"retest_arrangement_needed"},
+        )
+        _notify_retest_arranged(session, issue, link, actor_id)
     except (
         IssueInvalid,
         IssueManagementForbidden,

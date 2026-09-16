@@ -20,6 +20,7 @@ from app.files.models import StoredFile
 from app.identity.models import Account
 from app.issues import service as issues_service
 from app.issues.models import Issue, IssueEvidenceLink, IssueRetestLink
+from app.notifications import service as notifications_service
 from app.playtests import service as playtests_service
 from app.project_baseline import reset, reset_confirmation
 from app.works import service as works_service
@@ -496,6 +497,91 @@ def test_adjustment_retest_and_current_conclusion_follow_explicit_evidence() -> 
         assert concluded.verification_status == "insufficient_evidence"
         assert concluded.current_conclusion is not None
         assert concluded.current_conclusion.retest_id == target.id
+
+
+def test_retest_arranged_todo_targets_issue_and_stops_when_session_is_cancelled() -> (
+    None
+):
+    _reset()
+    owner_id, organizer_id, workspace_id, work_id, issue_id, _ = _baseline_ids()
+
+    with SessionLocal() as session:
+        issue = issues_service.read_issue(
+            session, owner_id, workspace_id, work_id, issue_id
+        )
+        updated = issues_service.update_issue(
+            session,
+            owner_id,
+            workspace_id,
+            work_id,
+            issue.id,
+            description=issue.description,
+            decision=issue.decision,
+            reason=issue.reason,
+            adjustment_note="补充一个待验证的计分边界。",
+            status="open",
+            expected_revision=issue.revision,
+        )
+        set_actor(session, owner_id)
+        works_service.set_work_access(
+            session,
+            owner_id,
+            workspace_id,
+            work_id,
+            organizer_id,
+            "maintainer",
+        )
+        set_project_baseline_scope(session)
+        material_ids = tuple(
+            session.scalars(
+                select(StoredFile.id)
+                .where(StoredFile.kind == "material")
+                .order_by(StoredFile.id)
+            )
+        )
+        plan = playtests_service.create_plan(
+            session,
+            owner_id,
+            workspace_id,
+            work_id,
+            "验证调整后的计分边界。",
+            "记录玩家在边界条件下的提问。",
+            (
+                playtests_service.SessionDraft(
+                    scheduled_at=datetime.now(UTC) + timedelta(days=7),
+                    location="复测桌 D",
+                    capacity=2,
+                    material_file_ids=material_ids,
+                    participant_emails=(),
+                ),
+            ),
+            retest_issue_id=updated.id,
+            retest_issue_expected_revision=updated.revision,
+        )
+
+        set_actor(session, organizer_id)
+        todos, total = notifications_service.list_todos(
+            session, organizer_id, "open", 1, 20
+        )
+        arranged = next(todo for todo in todos if todo.kind == "retest_arranged")
+        assert total >= 1
+        assert arranged.target_kind == "issue"
+        assert arranged.target_id == issue.id
+
+        set_actor(session, owner_id)
+        playtests_service.cancel_session(
+            session,
+            owner_id,
+            workspace_id,
+            work_id,
+            plan.sessions[0].id,
+            plan.sessions[0].revision,
+        )
+        set_actor(session, organizer_id)
+        cancelled, _ = notifications_service.list_todos(
+            session, organizer_id, "cancelled", 1, 20
+        )
+        assert any(todo.id == arranged.id for todo in cancelled)
 
 
 def test_v18_retest_is_not_reused_for_a_later_adjustment_after_upgrade() -> None:

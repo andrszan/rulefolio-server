@@ -7,9 +7,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.access.context import (
+    set_actor,
     set_invitation_credential,
     set_maintenance_workspace_scope,
     set_work_access_cleanup_scope,
+    set_workspace_invitation_inbox_scope,
     set_workspace_management_scope,
 )
 from app.audit.models import SecurityAudit
@@ -17,7 +19,14 @@ from app.core.config import settings
 from app.identity import service as identity_service
 from app.identity.models import Account, OneTimeCredential
 from app.notifications.models import MailOutbox
-from app.notifications.service import clear_outbox_envelopes, enqueue_token_mail
+from app.notifications.service import (
+    cancel_todo_by_source,
+    clear_outbox_envelopes,
+    complete_todo_by_source,
+    create_todo,
+    delete_work_access_todos,
+    enqueue_token_mail,
+)
 from app.workspaces.models import (
     WorkAccess,
     Workspace,
@@ -181,6 +190,16 @@ def lock_work_accesses(session: Session, work_id: UUID) -> list[WorkAccessRecord
             .with_for_update()
         )
     ]
+
+
+def current_work_maintainer_ids(session: Session, work_id: UUID) -> tuple[UUID, ...]:
+    return tuple(
+        session.scalars(
+            select(WorkAccess.account_id)
+            .where(WorkAccess.work_id == work_id, WorkAccess.role == "maintainer")
+            .order_by(WorkAccess.account_id)
+        )
+    )
 
 
 def add_work_access(
@@ -447,6 +466,54 @@ def _lock_invitations(
     }
 
 
+def _expire_invitation(
+    session: Session,
+    invitation: WorkspaceInvitation,
+    credential: OneTimeCredential | None,
+    now: datetime,
+) -> bool:
+    if _invitation_status(invitation, credential, now) != "expired":
+        return False
+    invitation.status = "expired"
+    cancel_todo_by_source(
+        session,
+        invitation.account_id,
+        "workspace_invitation",
+        str(invitation.id),
+    )
+    if credential is not None:
+        identity_service.revoke_workspace_invitation_credential(
+            session, credential, now
+        )
+        clear_outbox_envelopes(session, [credential.id])
+    return True
+
+
+def expire_inbox_invitation(
+    session: Session, account_id: UUID, invitation_id: UUID, now: datetime
+) -> bool:
+    set_actor(session, account_id)
+    set_workspace_invitation_inbox_scope(session, invitation_id)
+    invitation = session.scalar(
+        select(WorkspaceInvitation)
+        .where(
+            WorkspaceInvitation.id == invitation_id,
+            WorkspaceInvitation.account_id == account_id,
+        )
+        .with_for_update()
+    )
+    if invitation is None:
+        return False
+    set_invitation_credential(session, invitation.credential_id)
+    _lock_outboxes(session, [invitation.credential_id])
+    credential = session.scalar(
+        select(OneTimeCredential)
+        .where(OneTimeCredential.id == invitation.credential_id)
+        .with_for_update()
+    )
+    return _expire_invitation(session, invitation, credential, now)
+
+
 def _expire_active_invitations(
     session: Session, workspace_id: UUID, account_id: UUID, now: datetime
 ) -> WorkspaceInvitation | None:
@@ -469,7 +536,6 @@ def _expire_active_invitations(
     invitations = _lock_invitations(session, invitation_ids)
 
     active: WorkspaceInvitation | None = None
-    expired_credential_ids: list[UUID] = []
     for invitation_id in invitation_ids:
         invitation = invitations.get(invitation_id)
         if (
@@ -481,20 +547,8 @@ def _expire_active_invitations(
         ):
             continue
         credential = credentials.get(invitation.credential_id)
-        if (
-            credential is None
-            or credential.status != identity_service.TOKEN_ACTIVE
-            or credential.expires_at <= now
-        ):
-            invitation.status = "expired"
-            if credential is not None:
-                identity_service.revoke_workspace_invitation_credential(
-                    session, credential, now
-                )
-                expired_credential_ids.append(credential.id)
-        else:
+        if not _expire_invitation(session, invitation, credential, now):
             active = invitation
-    clear_outbox_envelopes(session, expired_credential_ids)
     return active
 
 
@@ -715,6 +769,21 @@ def create_invitation(
         )
         session.add(invitation)
         session.flush()
+        todo_id = None
+        if account.status == identity_service.ACTIVE:
+            todo, _ = create_todo(
+                session,
+                recipient_account_id=account.id,
+                workspace_id=workspace.id,
+                work_id=None,
+                kind="workspace_invitation",
+                target_kind="workspace_invitation",
+                target_id=invitation.id,
+                source_key=str(invitation.id),
+                summary="加入工作空间邀请",
+                context_label=f"工作空间：{workspace.name}",
+            )
+            todo_id = todo.id
         outbox = enqueue_token_mail(
             session,
             credential.id,
@@ -722,6 +791,7 @@ def create_invitation(
             identity_service.WORKSPACE_INVITATION,
             token,
             workspace_name=workspace.name,
+            todo_id=todo_id,
         )
         session.add(
             SecurityAudit(
@@ -781,12 +851,24 @@ def revoke_invitation(
             identity_service.revoke_workspace_invitation_credential(
                 session, credential, now
             )
+            cancel_todo_by_source(
+                session,
+                invitation.account_id,
+                "workspace_invitation",
+                str(invitation.id),
+            )
             clear_outbox_envelopes(session, [credential.id])
         elif invitation.status == "active":
             invitation.status = "revoked"
             invitation.revoked_at = now
             identity_service.revoke_workspace_invitation_credential(
                 session, credential, now
+            )
+            cancel_todo_by_source(
+                session,
+                invitation.account_id,
+                "workspace_invitation",
+                str(invitation.id),
             )
             clear_outbox_envelopes(session, [credential.id])
             session.add(
@@ -864,6 +946,7 @@ def remove_member(
             ):
                 session.rollback()
                 raise WorkspaceMemberLastMaintainerRequired
+            delete_work_access_todos(session, account_id, work_id)
             session.delete(target_access)
             session.add(
                 SecurityAudit(
@@ -907,6 +990,12 @@ def remove_member(
                 continue
             invitation.status = "revoked"
             invitation.revoked_at = now
+            cancel_todo_by_source(
+                session,
+                invitation.account_id,
+                "workspace_invitation",
+                str(invitation.id),
+            )
             credential = credentials.get(invitation.credential_id)
             if credential is not None:
                 identity_service.revoke_workspace_invitation_credential(
@@ -999,6 +1088,13 @@ def exchange_current_session_invitation(
         ):
             session.rollback()
             _record_unavailable(session, subject_hash)
+        complete_todo_by_source(
+            session,
+            actor_account_id,
+            "workspace_invitation",
+            str(invitation.id),
+        )
+        clear_outbox_envelopes(session, [credential.id])
         _clear_attempt(session, subject_hash)
         session.add(
             SecurityAudit(
@@ -1014,6 +1110,105 @@ def exchange_current_session_invitation(
         WorkspaceInvitationRateLimited,
         WorkspaceInvitationUnavailable,
     ):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise WorkspaceOperationRetryable from error
+    except Exception:
+        session.rollback()
+        raise
+    return InvitationExchangeResult(_workspace_data(workspace, actor_account_id))
+
+
+def exchange_inbox_invitation(
+    session: Session, actor_account_id: UUID, invitation_id: UUID, operation_key: str
+) -> InvitationExchangeResult:
+    try:
+        set_actor(session, actor_account_id)
+        set_workspace_invitation_inbox_scope(session, invitation_id)
+        invitation = session.scalar(
+            select(WorkspaceInvitation)
+            .where(
+                WorkspaceInvitation.id == invitation_id,
+                WorkspaceInvitation.account_id == actor_account_id,
+            )
+            .with_for_update()
+        )
+        if invitation is None:
+            session.rollback()
+            raise WorkspaceInvitationUnavailable
+        credential = session.scalar(
+            select(OneTimeCredential)
+            .where(OneTimeCredential.id == invitation.credential_id)
+            .with_for_update()
+        )
+        if credential is None:
+            session.rollback()
+            raise WorkspaceInvitationUnavailable
+        set_invitation_credential(session, credential.id)
+        workspace = session.get(Workspace, invitation.workspace_id)
+        now = _now()
+        if workspace is None:
+            session.rollback()
+            raise WorkspaceInvitationUnavailable
+        if invitation.status == "accepted":
+            if (
+                invitation.accepted_operation == "inbox"
+                and invitation.accepted_operation_key == operation_key
+            ):
+                _commit_or_rollback(session)
+                return InvitationExchangeResult(
+                    _workspace_data(workspace, actor_account_id)
+                )
+            session.rollback()
+            raise WorkspaceInvitationUnavailable
+        if not _is_exchange_available(credential, invitation, now):
+            if _expire_invitation(session, invitation, credential, now):
+                _commit_or_rollback(session)
+            else:
+                session.rollback()
+            raise WorkspaceInvitationUnavailable
+        member = session.scalar(
+            select(WorkspaceMember).where(
+                WorkspaceMember.workspace_id == invitation.workspace_id,
+                WorkspaceMember.account_id == actor_account_id,
+            )
+        )
+        if member is not None:
+            session.rollback()
+            raise WorkspaceInvitationUnavailable
+        session.add(
+            WorkspaceMember(
+                workspace_id=invitation.workspace_id, account_id=actor_account_id
+            )
+        )
+        session.flush()
+        invitation.status = "accepted"
+        invitation.accepted_at = now
+        invitation.accepted_operation_key = operation_key
+        invitation.accepted_operation = "inbox"
+        if not identity_service.consume_workspace_invitation_credential(
+            session, credential, now
+        ):
+            session.rollback()
+            raise WorkspaceInvitationUnavailable
+        complete_todo_by_source(
+            session,
+            actor_account_id,
+            "workspace_invitation",
+            str(invitation.id),
+        )
+        clear_outbox_envelopes(session, [credential.id])
+        session.add(
+            SecurityAudit(
+                action="workspace_member_granted",
+                actor_account_id=actor_account_id,
+                target_account_id=actor_account_id,
+                scope=str(invitation.workspace_id),
+            )
+        )
+        _commit_or_rollback(session)
+    except WorkspaceInvitationUnavailable:
         raise
     except SQLAlchemyError as error:
         session.rollback()

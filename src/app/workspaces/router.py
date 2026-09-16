@@ -46,6 +46,12 @@ class WorkspaceInvitationExchangeRequest(BaseModel):
     token: str = Field(min_length=1, max_length=1024)
 
 
+class WorkspaceInvitationInboxRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    invitation_id: UUID = Field(validation_alias="invitationId")
+
+
 class WorkspaceInvitationActivationRequest(WorkspaceInvitationExchangeRequest):
     new_password: str = Field(
         min_length=1, max_length=1024, validation_alias="newPassword"
@@ -412,6 +418,31 @@ def exchange_current_session_invitation(
             "当前账户不能继续此邀请。",
             "workspace_invitation_account_mismatch",
         ) from error
+    except Exception as error:
+        _workspace_error(error)
+        raise
+    return ApiResponse(
+        code=200,
+        message="已加入工作空间",
+        data=_workspace_response(result.workspace),
+    )
+
+
+@router.post(
+    "/workspace-invitation-exchanges/inbox",
+    response_model=ApiResponse[WorkspaceResponseData],
+    summary="从站内待办接受工作空间邀请",
+)
+def exchange_inbox_invitation(
+    request: WorkspaceInvitationInboxRequest,
+    operation_key: Annotated[str, Depends(_idempotency_key)],
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[WorkspaceResponseData]:
+    try:
+        result = service.exchange_inbox_invitation(
+            session, account.id, request.invitation_id, operation_key
+        )
     except Exception as error:
         _workspace_error(error)
         raise

@@ -13,6 +13,7 @@ from app.access.context import (
 from app.audit.models import SecurityAudit
 from app.files import materials as material_files
 from app.files.models import StoredFile
+from app.notifications.service import delete_work_access_todos
 from app.works.models import Work, WorkMaterialFile
 from app.workspaces import service as workspaces_service
 
@@ -684,6 +685,8 @@ def set_work_access(
             )
             action = "work_access_granted"
         elif access.role != role:
+            if access.role == MAINTAINER and role != MAINTAINER:
+                delete_work_access_todos(session, account_id, work.id)
             workspaces_service.update_work_access_role(
                 session, work.id, account_id, role
             )
@@ -740,6 +743,7 @@ def revoke_work_access(
         ):
             session.rollback()
             raise WorkLastMaintainerRequired
+        delete_work_access_todos(session, account_id, work.id)
         workspaces_service.delete_work_access(session, work.id, account_id)
         session.add(
             SecurityAudit(

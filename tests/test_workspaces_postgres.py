@@ -1,5 +1,5 @@
 from threading import Event, Thread
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
@@ -213,7 +213,7 @@ def test_unknown_invitation_tokens_do_not_create_attempt_records() -> None:
         assert second_attempt.count == 2
 
 
-def test_invitation_dispatch_and_revocation_share_lock_order(
+def test_invitation_revocation_before_smtp_boundary_suppresses_send(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     suffix = uuid4().hex
@@ -224,7 +224,7 @@ def test_invitation_dispatch_and_revocation_share_lock_order(
         session.add_all((owner, recipient))
         session.commit()
         set_actor(session, owner.id)
-        workspace_name = f"并发锁顺序验证-{suffix}"
+        workspace_name = f"并发撤销验证-{suffix}"
         workspace = service.create_workspace(session, owner.id, workspace_name, None)
         set_actor(session, owner.id)
         invitation = service.create_invitation(
@@ -239,32 +239,21 @@ def test_invitation_dispatch_and_revocation_share_lock_order(
         outbox.claim_id = claim.claim_id
         session.commit()
 
-    original_load_claim = dispatcher._load_claim
-    original_lock_outboxes = service._lock_outboxes
-    dispatcher_outbox_locked = Event()
-    revoke_requested_outbox_lock = Event()
-    release_dispatch = Event()
+    original_start_smtp = dispatcher._start_smtp
+    dispatch_ready = Event()
+    revocation_complete = Event()
     errors: list[Exception] = []
     results: dict[str, object] = {}
+    sent: list[tuple[object, ...]] = []
 
-    def load_claim(
-        session: Session, dispatch_claim: dispatcher.DispatchClaim
-    ) -> MailOutbox | None:
-        outbox = original_load_claim(session, dispatch_claim)
-        dispatcher_outbox_locked.set()
-        assert release_dispatch.wait(timeout=5)
-        return outbox
-
-    def lock_outboxes(
-        session: Session, credential_ids: list[UUID]
-    ) -> dict[UUID, MailOutbox]:
-        revoke_requested_outbox_lock.set()
-        return original_lock_outboxes(session, credential_ids)
+    def start_smtp(session: Session, dispatch_claim: dispatcher.DispatchClaim) -> bool:
+        dispatch_ready.set()
+        assert revocation_complete.wait(timeout=5)
+        return original_start_smtp(session, dispatch_claim)
 
     monkeypatch.setattr(dispatcher, "_claim_next", lambda _: claim)
-    monkeypatch.setattr(dispatcher, "_load_claim", load_claim)
-    monkeypatch.setattr(dispatcher, "_send", lambda *_: None)
-    monkeypatch.setattr(service, "_lock_outboxes", lock_outboxes)
+    monkeypatch.setattr(dispatcher, "_start_smtp", start_smtp)
+    monkeypatch.setattr(dispatcher, "_send", lambda *args: sent.append(args))
 
     def dispatch() -> None:
         try:
@@ -282,21 +271,30 @@ def test_invitation_dispatch_and_revocation_share_lock_order(
                 )
         except Exception as error:
             errors.append(error)
+        finally:
+            revocation_complete.set()
 
     dispatch_thread = Thread(target=dispatch)
     revoke_thread = Thread(target=revoke)
     dispatch_thread.start()
-    assert dispatcher_outbox_locked.wait(timeout=5)
+    assert dispatch_ready.wait(timeout=5)
     revoke_thread.start()
-    assert revoke_requested_outbox_lock.wait(timeout=5)
-    release_dispatch.set()
-    dispatch_thread.join(timeout=5)
     revoke_thread.join(timeout=5)
+    dispatch_thread.join(timeout=5)
 
     assert not dispatch_thread.is_alive()
     assert not revoke_thread.is_alive()
     assert errors == []
-    assert results["dispatch"] in {"accepted", "cancelled", "superseded"}
+    assert results["dispatch"] == "superseded"
+    assert sent == []
     revoked = results["revoke"]
     assert isinstance(revoked, service.WorkspaceInvitationData)
     assert revoked.status == "revoked"
+
+    with SessionLocal() as session:
+        cancelled_outbox = session.scalar(
+            select(MailOutbox).where(MailOutbox.id == outbox.id)
+        )
+        assert cancelled_outbox is not None
+        assert cancelled_outbox.status == "cancelled"
+        assert cancelled_outbox.smtp_started_at is None
