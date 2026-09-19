@@ -15,6 +15,7 @@ from app.identity import service as identity_service
 from app.identity.models import Account
 from app.identity.router import _bearer_token
 from app.notifications import service
+from app.workspaces import service as workspaces_service
 
 router = APIRouter(tags=["notifications"])
 
@@ -77,6 +78,10 @@ def _response(data: service.NotificationTodoData) -> NotificationTodoResponseDat
 
 
 def _notification_error(error: Exception) -> None:
+    if isinstance(error, workspaces_service.WorkspaceExitInProgress):
+        raise api_error(
+            409, "工作空间正在退出", "workspace_exit_in_progress"
+        ) from error
     if isinstance(error, service.NotificationTodoUnavailable):
         raise api_error(
             404, "待办内容不可用", "notification_todo_unavailable"

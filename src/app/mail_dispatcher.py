@@ -6,6 +6,7 @@ from app.identity.service import (
     recover_stale_recovery_request_jobs,
 )
 from app.notifications.dispatcher import dispatch_one, recover_stale_dispatches
+from app.workspaces.service import process_next_due_workspace_exit
 
 
 def main() -> None:
@@ -19,9 +20,15 @@ def main() -> None:
         recover_stale_recovery_request_jobs(session)
         recover_stale_dispatches(session)
         if args.once:
-            result = process_next_recovery_request(session) or dispatch_one(session)
+            result = (
+                process_next_due_workspace_exit(session)
+                or process_next_recovery_request(session)
+                or dispatch_one(session)
+            )
             print(result or "empty")
             return
+        while process_next_due_workspace_exit(session) is not None:
+            pass
         while process_next_recovery_request(session) is not None:
             pass
         while dispatch_one(session) is not None:

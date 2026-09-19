@@ -35,6 +35,7 @@ from app.files.policy import (
     UPLOAD_CHUNK_SIZE,
 )
 from app.works import service as works_service
+from app.workspaces import service as workspaces_service
 
 _FORMAT_TYPES = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
 
@@ -559,6 +560,8 @@ def _upload_file(
     *,
     kind: str,
 ) -> StoredFile:
+    set_actor(session, actor_id)
+    workspaces_service.ensure_workspace_writable(session, workspace_id)
     reader = _read_material if kind == "material" else _read_image
     upload = reader(source, filename, declared_content_type)
     manager_required = kind == "material"

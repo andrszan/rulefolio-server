@@ -17,6 +17,7 @@ from app.identity import service as identity_service
 from app.identity.models import Account
 from app.identity.router import _bearer_token
 from app.works import service as works_service
+from app.workspaces import service as workspaces_service
 
 router = APIRouter(tags=["files"])
 
@@ -118,6 +119,10 @@ def _material_limits_response(
 
 
 def _file_error(error: Exception) -> None:
+    if isinstance(error, workspaces_service.WorkspaceExitInProgress):
+        raise api_error(
+            409, "工作空间正在退出", "workspace_exit_in_progress"
+        ) from error
     if isinstance(error, works_service.WorkUnavailable):
         raise api_error(404, "作品不可用", "work_unavailable") from error
     if isinstance(error, works_service.WorkOperationRetryable):

@@ -342,13 +342,22 @@ def _scope(session: Session, workspace_id: UUID, work_id: UUID) -> None:
 
 
 def _require_management(
-    session: Session, actor_id: UUID, workspace_id: UUID, work_id: UUID
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    *,
+    writable: bool = False,
 ) -> None:
     set_actor(session, actor_id)
     try:
+        if writable:
+            workspaces_service.ensure_workspace_writable(session, workspace_id)
         works_service.ensure_playtest_management(
             session, actor_id, workspace_id, work_id
         )
+    except workspaces_service.WorkspaceUnavailable as error:
+        raise PlaytestUnavailable from error
     except works_service.WorkManagementForbidden as error:
         raise PlaytestManagementForbidden from error
     except works_service.WorkUnavailable as error:
@@ -1103,7 +1112,7 @@ def create_plan(
     ):
         raise PlaytestMaterialSelectionInvalid
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         plan = PlaytestPlan(
             workspace_id=workspace_id,
             work_id=work_id,
@@ -1167,7 +1176,7 @@ def append_session(
     draft: SessionDraft,
 ) -> SessionData:
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         plan = _load_plan(session, workspace_id, work_id, plan_id)
         item = _create_session(session, actor_id, workspace_id, work_id, plan, draft)
         item_id = item.id
@@ -1207,7 +1216,7 @@ def update_arrangement(
     if not location or capacity <= 0 or scheduled_at.tzinfo is None:
         raise PlaytestMaterialSelectionInvalid
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         item = _load_managed_session(
             session, workspace_id, work_id, session_id, lock=True
         )
@@ -1260,7 +1269,7 @@ def replace_materials(
     if not material_file_ids or len(set(material_file_ids)) != len(material_file_ids):
         raise PlaytestMaterialSelectionInvalid
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         item = _load_managed_session(
             session, workspace_id, work_id, session_id, lock=True
         )
@@ -1330,7 +1339,7 @@ def start_session(
     expected_revision: int,
 ) -> SessionData:
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         item = _load_managed_session(
             session, workspace_id, work_id, session_id, lock=True
         )
@@ -1367,7 +1376,7 @@ def cancel_session(
     expected_revision: int,
 ) -> SessionData:
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         item = _load_managed_session(
             session, workspace_id, work_id, session_id, lock=True
         )
@@ -1669,7 +1678,7 @@ def save_result(
     if expected_revision <= 0:
         raise PlaytestResultInvalid
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         item = _load_managed_session(
             session, workspace_id, work_id, session_id, lock=True
         )
@@ -1770,7 +1779,7 @@ def create_observation(
     if expected_revision <= 0:
         raise PlaytestResultInvalid
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         item = _load_managed_session(
             session, workspace_id, work_id, session_id, lock=True
         )
@@ -1817,7 +1826,7 @@ def update_observation(
     if expected_revision <= 0:
         raise PlaytestResultInvalid
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         item = _load_managed_session(
             session, workspace_id, work_id, session_id, lock=True
         )
@@ -1949,6 +1958,9 @@ def confirm_participation(
         participant, item = _participant_session(
             session, actor_id, session_id, lock=True
         )
+        workspaces_service.ensure_authorized_workspace_writable(
+            session, item.workspace_id
+        )
         set_playtest_session_scope(session, item.id)
         participant = session.scalar(
             select(PlaytestSessionParticipant)
@@ -2030,8 +2042,9 @@ def _feedback_managed_session(
     session_id: UUID,
     *,
     lock: bool,
+    writable: bool = False,
 ) -> PlaytestSession:
-    _require_management(session, actor_id, workspace_id, work_id)
+    _require_management(session, actor_id, workspace_id, work_id, writable=writable)
     item = _load_managed_session(session, workspace_id, work_id, session_id, lock=lock)
     if item.status == CANCELLED:
         session.rollback()
@@ -2089,7 +2102,13 @@ def create_feedback_item(
 ) -> evidence_service.FeedbackItemData:
     try:
         item = _feedback_managed_session(
-            session, actor_id, workspace_id, work_id, session_id, lock=True
+            session,
+            actor_id,
+            workspace_id,
+            work_id,
+            session_id,
+            lock=True,
+            writable=True,
         )
         _require_feedback_mutable(item, session)
         result = evidence_service.create_feedback_item(
@@ -2123,7 +2142,13 @@ def update_feedback_item(
 ) -> evidence_service.FeedbackItemData:
     try:
         item = _feedback_managed_session(
-            session, actor_id, workspace_id, work_id, session_id, lock=True
+            session,
+            actor_id,
+            workspace_id,
+            work_id,
+            session_id,
+            lock=True,
+            writable=True,
         )
         _require_feedback_mutable(item, session)
         result = evidence_service.update_feedback_item(
@@ -2157,7 +2182,13 @@ def delete_feedback_item(
 ) -> None:
     try:
         item = _feedback_managed_session(
-            session, actor_id, workspace_id, work_id, session_id, lock=True
+            session,
+            actor_id,
+            workspace_id,
+            work_id,
+            session_id,
+            lock=True,
+            writable=True,
         )
         _require_feedback_mutable(item, session)
         evidence_service.delete_feedback_item(session, item.id, item_id)
@@ -2187,7 +2218,13 @@ def create_feedback_submission(
 ) -> evidence_service.FeedbackSubmissionData:
     try:
         item = _feedback_managed_session(
-            session, actor_id, workspace_id, work_id, session_id, lock=True
+            session,
+            actor_id,
+            workspace_id,
+            work_id,
+            session_id,
+            lock=True,
+            writable=True,
         )
         _require_feedback_mutable(item, session)
         existing = session.scalar(
@@ -2229,7 +2266,13 @@ def update_feedback_submission(
 ) -> evidence_service.FeedbackSubmissionData:
     try:
         item = _feedback_managed_session(
-            session, actor_id, workspace_id, work_id, session_id, lock=True
+            session,
+            actor_id,
+            workspace_id,
+            work_id,
+            session_id,
+            lock=True,
+            writable=True,
         )
         _require_feedback_mutable(item, session)
         result = evidence_service.update_organizer_submission(
@@ -2268,6 +2311,9 @@ def save_participant_feedback(
 ) -> evidence_service.FeedbackSubmissionData:
     try:
         _, item = _participant_session(session, actor_id, session_id, lock=True)
+        workspaces_service.ensure_authorized_workspace_writable(
+            session, item.workspace_id
+        )
         if item.status != STARTED:
             session.rollback()
             raise PlaytestSessionStateInvalid

@@ -107,6 +107,32 @@ def validate_password(password: str) -> None:
         )
 
 
+def verify_current_password(session: Session, account_id: UUID, password: str) -> bool:
+    """复核当前密码，不提交事务，也不区分账户或哈希失败。"""
+    credential = session.get(PasswordCredential, account_id)
+    password_hash = (
+        credential.password_hash if credential is not None else DUMMY_PASSWORD_HASH
+    )
+    try:
+        return _password_hasher().verify(password_hash, password)
+    except (InvalidHashError, VerifyMismatchError):
+        return False
+
+
+def revoke_sessions_for_accounts(
+    session: Session, account_ids: list[UUID], reason: str
+) -> None:
+    if account_ids:
+        session.execute(
+            update(SessionRecord)
+            .where(
+                SessionRecord.account_id.in_(account_ids),
+                SessionRecord.revoked_at.is_(None),
+            )
+            .values(revoked_at=_now(), revoke_reason=reason)
+        )
+
+
 def _password_hasher() -> PasswordHasher:
     return PasswordHasher(
         time_cost=settings.argon2_time_cost,

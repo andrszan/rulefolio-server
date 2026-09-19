@@ -12,6 +12,7 @@ from app.identity import service as identity_service
 from app.identity.models import Account
 from app.identity.router import _bearer_token
 from app.works import service
+from app.workspaces import service as workspaces_service
 
 router = APIRouter(tags=["works"])
 
@@ -218,6 +219,10 @@ def _work_error(error: Exception) -> None:
         raise api_error(404, "成员不可用", "workspace_member_unavailable") from error
     if isinstance(error, service.WorkAccessUnavailable):
         raise api_error(404, "作品访问关系不可用", "work_access_unavailable") from error
+    if isinstance(error, workspaces_service.WorkspaceExitInProgress):
+        raise api_error(
+            409, "工作空间正在退出", "workspace_exit_in_progress"
+        ) from error
     if isinstance(error, service.WorkOperationRetryable):
         raise api_error(
             503,

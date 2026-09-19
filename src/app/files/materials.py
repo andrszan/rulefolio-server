@@ -19,6 +19,7 @@ class MaterialData:
     display_name: str
     detected_content_type: str
     size_bytes: int
+    sha256: str
     created_at: datetime
 
 
@@ -28,6 +29,7 @@ def material_data(file: StoredFile) -> MaterialData:
         display_name=file.display_name,
         detected_content_type=file.detected_content_type,
         size_bytes=file.size_bytes,
+        sha256=file.sha256.hex(),
         created_at=file.created_at,
     )
 

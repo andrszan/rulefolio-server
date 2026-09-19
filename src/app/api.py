@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.exports.router import router as exports_router
 from app.files.router import router as files_router
 from app.identity.router import router as identity_router
 from app.issues.router import router as issues_router
@@ -10,6 +11,7 @@ from app.workspaces.router import router as workspaces_router
 
 router = APIRouter()
 router.include_router(identity_router)
+router.include_router(exports_router)
 router.include_router(files_router)
 router.include_router(playtests_router)
 router.include_router(issues_router)

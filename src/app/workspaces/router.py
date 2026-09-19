@@ -42,6 +42,14 @@ class WorkspaceInvitationCreateRequest(BaseModel):
     email: EmailStr
 
 
+class WorkspaceExitRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    password: str = Field(min_length=1, max_length=1024)
+    expected_revision: int = Field(gt=0, validation_alias="expectedRevision")
+    read_until: datetime = Field(validation_alias="readUntil")
+
+
 class WorkspaceInvitationExchangeRequest(BaseModel):
     token: str = Field(min_length=1, max_length=1024)
 
@@ -65,6 +73,9 @@ class WorkspaceResponseData(BaseModel):
     name: str
     description: str | None
     is_owner: bool = Field(serialization_alias="isOwner")
+    revision: int
+    access_state: str = Field(serialization_alias="accessState")
+    read_until: datetime | None = Field(serialization_alias="readUntil")
 
 
 class WorkspaceMemberResponseData(BaseModel):
@@ -103,6 +114,9 @@ def _workspace_response(data: service.WorkspaceData) -> WorkspaceResponseData:
         name=data.name,
         description=data.description,
         is_owner=data.is_owner,
+        revision=data.revision,
+        access_state=data.access_state,
+        read_until=data.read_until,
     )
 
 
@@ -170,6 +184,22 @@ def _workspace_error(error: Exception) -> None:
         raise api_error(
             400, "此邀请不能继续使用", "workspace_invitation_unavailable"
         ) from error
+    if isinstance(error, service.WorkspaceExitReauthenticationFailed):
+        raise api_error(
+            403,
+            "当前身份不能确认退出操作",
+            "workspace_exit_reauthentication_failed",
+        ) from error
+    if isinstance(error, service.WorkspaceRevisionConflict):
+        raise api_error(
+            409, "工作空间已更新，请重新加载后核对", "workspace_revision_conflict"
+        ) from error
+    if isinstance(error, service.WorkspaceExitInProgress):
+        raise api_error(
+            409, "工作空间正在退出", "workspace_exit_in_progress"
+        ) from error
+    if isinstance(error, service.WorkspaceExitInvalid):
+        raise api_error(422, "请求参数有误", "validation_failed") from error
     if isinstance(error, service.WorkspaceOperationRetryable):
         raise api_error(
             503,
@@ -247,6 +277,38 @@ def read_workspace(
         raise
     return ApiResponse(
         code=200, message="工作空间已加载", data=_workspace_response(workspace)
+    )
+
+
+@router.post(
+    "/workspaces/{workspace_id}/exit",
+    response_model=ApiResponse[WorkspaceResponseData],
+    summary="发起不可撤销的工作空间退出",
+)
+def request_workspace_exit(
+    workspace_id: UUID,
+    request: WorkspaceExitRequest,
+    operation_key: Annotated[str, Depends(_idempotency_key)],
+    account: Annotated[Account, Depends(_authenticated_account)],
+    session: Session = Depends(get_db),
+) -> ApiResponse[WorkspaceResponseData]:
+    try:
+        workspace = service.request_workspace_exit(
+            session,
+            account.id,
+            workspace_id,
+            request.password,
+            request.expected_revision,
+            request.read_until,
+            operation_key,
+        )
+    except Exception as error:
+        _workspace_error(error)
+        raise
+    return ApiResponse(
+        code=200,
+        message="工作空间资料取得窗口已建立",
+        data=_workspace_response(workspace),
     )
 
 

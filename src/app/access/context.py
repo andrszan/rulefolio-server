@@ -57,6 +57,16 @@ def set_maintenance_workspace_scope(session: Session, workspace_id: UUID) -> Non
     _set_scope(session, "app.maintenance_workspace_id", workspace_id)
 
 
+def set_workspace_exit_maintenance_scope(session: Session, workspace_id: UUID) -> None:
+    _set_scope(session, "app.workspace_exit_maintenance_id", workspace_id)
+
+
+def set_workspace_exit_processor(session: Session) -> None:
+    session.execute(
+        text("SELECT set_config('app.workspace_exit_processor', 'active', true)")
+    )
+
+
 def set_work_management_scope(
     session: Session, work_id: UUID, workspace_id: UUID
 ) -> None:

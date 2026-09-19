@@ -2,7 +2,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
@@ -11,6 +11,8 @@ from app.access.context import (
     set_invitation_credential,
     set_maintenance_workspace_scope,
     set_work_access_cleanup_scope,
+    set_workspace_exit_maintenance_scope,
+    set_workspace_exit_processor,
     set_workspace_invitation_inbox_scope,
     set_workspace_management_scope,
 )
@@ -21,6 +23,7 @@ from app.identity.models import Account, OneTimeCredential
 from app.notifications.models import MailOutbox
 from app.notifications.service import (
     cancel_todo_by_source,
+    cancel_workspace_todos,
     clear_outbox_envelopes,
     complete_todo_by_source,
     create_todo,
@@ -84,6 +87,22 @@ class WorkspaceOperationRetryable(Exception):
     pass
 
 
+class WorkspaceExitReauthenticationFailed(Exception):
+    pass
+
+
+class WorkspaceRevisionConflict(Exception):
+    pass
+
+
+class WorkspaceExitInProgress(Exception):
+    pass
+
+
+class WorkspaceExitInvalid(Exception):
+    pass
+
+
 @dataclass(frozen=True)
 class WorkspaceInvitationRateLimited(Exception):
     retry_after: int
@@ -95,6 +114,9 @@ class WorkspaceData:
     name: str
     description: str | None
     is_owner: bool
+    revision: int = 1
+    access_state: str = "active"
+    read_until: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -288,7 +310,27 @@ def _workspace_data(workspace: Workspace, account_id: UUID) -> WorkspaceData:
         name=workspace.name,
         description=workspace.description,
         is_owner=workspace.owner_account_id == account_id,
+        revision=workspace.revision,
+        access_state="exiting" if workspace.exit_requested_at is not None else "active",
+        read_until=workspace.exit_read_until,
     )
+
+
+def ensure_workspace_writable(session: Session, workspace_id: UUID) -> None:
+    workspace = _load_visible_workspace(session, workspace_id)
+    if workspace.exit_requested_at is not None:
+        session.rollback()
+        raise WorkspaceExitInProgress
+
+
+def ensure_authorized_workspace_writable(session: Session, workspace_id: UUID) -> None:
+    if session.scalar(
+        text("SELECT public.workspace_exit_allows_write(:workspace_id)"),
+        {"workspace_id": workspace_id},
+    ):
+        return
+    session.rollback()
+    raise WorkspaceExitInProgress
 
 
 def _load_visible_workspace(session: Session, workspace_id: UUID) -> Workspace:
@@ -739,6 +781,7 @@ def create_invitation(
 ) -> WorkspaceInvitationData:
     try:
         workspace = _require_workspace_manager(session, workspace_id, actor_account_id)
+        ensure_workspace_writable(session, workspace.id)
         account = identity_service.get_or_create_invitation_account(session, email)
         if account.status == identity_service.DISABLED:
             session.rollback()
@@ -822,6 +865,7 @@ def revoke_invitation(
 ) -> WorkspaceInvitationData:
     try:
         workspace = _require_workspace_manager(session, workspace_id, actor_account_id)
+        ensure_workspace_writable(session, workspace.id)
         candidate = session.execute(
             select(WorkspaceInvitation.id, WorkspaceInvitation.credential_id).where(
                 WorkspaceInvitation.workspace_id == workspace.id,
@@ -902,6 +946,7 @@ def remove_member(
 ) -> None:
     try:
         workspace = _require_workspace_manager(session, workspace_id, actor_account_id)
+        ensure_workspace_writable(session, workspace.id)
         if account_id == workspace.owner_account_id:
             session.rollback()
             raise WorkspaceOwnerCannotBeRemoved
@@ -1049,6 +1094,7 @@ def exchange_current_session_invitation(
         workspace = session.get(Workspace, invitation.workspace_id)
         if workspace is None:
             _record_unavailable(session, subject_hash)
+        ensure_workspace_writable(session, workspace.id)
         if invitation.status == "accepted":
             if (
                 invitation.accepted_operation == CURRENT_SESSION_OPERATION
@@ -1151,6 +1197,7 @@ def exchange_inbox_invitation(
         if workspace is None:
             session.rollback()
             raise WorkspaceInvitationUnavailable
+        ensure_workspace_writable(session, workspace.id)
         if invitation.status == "accepted":
             if (
                 invitation.accepted_operation == "inbox"
@@ -1306,6 +1353,204 @@ def exchange_account_activation_invitation(
     return InvitationExchangeResult(
         _workspace_data(workspace, account.id), session_result=session_result
     )
+
+
+def request_workspace_exit(
+    session: Session,
+    actor_account_id: UUID,
+    workspace_id: UUID,
+    password: str,
+    expected_revision: int,
+    read_until: datetime,
+    operation_key: str,
+) -> WorkspaceData:
+    if (
+        expected_revision <= 0
+        or read_until.tzinfo is None
+        or not operation_key
+        or len(operation_key) > 128
+    ):
+        raise WorkspaceExitInvalid
+    try:
+        workspace = session.scalar(
+            select(Workspace).where(Workspace.id == workspace_id)
+        )
+        if workspace is None:
+            session.rollback()
+            raise WorkspaceUnavailable
+        if (
+            workspace.owner_account_id != actor_account_id
+            or not identity_service.verify_current_password(
+                session, actor_account_id, password
+            )
+        ):
+            session.rollback()
+            raise WorkspaceExitReauthenticationFailed
+        if workspace.exit_requested_at is not None:
+            if (
+                workspace.exit_requested_by_account_id == actor_account_id
+                and workspace.exit_operation_key == operation_key
+            ):
+                _commit_or_rollback(session)
+                return _workspace_data(workspace, actor_account_id)
+            session.rollback()
+            raise WorkspaceExitInProgress
+        workspace = session.scalar(
+            select(Workspace)
+            .where(Workspace.id == workspace_id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+        if workspace is None:
+            workspace = session.scalar(
+                select(Workspace).where(Workspace.id == workspace_id)
+            )
+            if workspace is None:
+                session.rollback()
+                raise WorkspaceUnavailable
+            if (
+                workspace.exit_requested_by_account_id == actor_account_id
+                and workspace.exit_operation_key == operation_key
+            ):
+                _commit_or_rollback(session)
+                return _workspace_data(workspace, actor_account_id)
+            session.rollback()
+            raise WorkspaceExitInProgress
+        if workspace.exit_requested_at is not None:
+            if (
+                workspace.exit_requested_by_account_id == actor_account_id
+                and workspace.exit_operation_key == operation_key
+            ):
+                _commit_or_rollback(session)
+                return _workspace_data(workspace, actor_account_id)
+            session.rollback()
+            raise WorkspaceExitInProgress
+        if workspace.revision != expected_revision:
+            session.rollback()
+            raise WorkspaceRevisionConflict
+        now = session.scalar(select(func.current_timestamp()))
+        if now is None or read_until <= now:
+            session.rollback()
+            raise WorkspaceExitInvalid
+        workspace.exit_requested_at = now
+        workspace.exit_read_until = read_until
+        workspace.exit_requested_by_account_id = actor_account_id
+        workspace.exit_operation_key = operation_key
+        workspace.revision += 1
+        session.add(
+            SecurityAudit(
+                action="workspace_exit_requested",
+                actor_account_id=actor_account_id,
+                scope=f"workspace:{workspace.id};read_until:{read_until.isoformat()}",
+            )
+        )
+        _commit_or_rollback(session)
+    except (
+        WorkspaceExitInProgress,
+        WorkspaceExitInvalid,
+        WorkspaceExitReauthenticationFailed,
+        WorkspaceRevisionConflict,
+        WorkspaceUnavailable,
+    ):
+        raise
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise WorkspaceOperationRetryable from error
+    except Exception:
+        session.rollback()
+        raise
+    return _workspace_data(workspace, actor_account_id)
+
+
+def process_next_due_workspace_exit(session: Session) -> str | None:
+    """收敛一项到期退出；调用方负责轮询，不创建独立任务队列。"""
+    try:
+        set_workspace_exit_processor(session)
+        workspace = session.scalar(
+            select(Workspace)
+            .where(
+                Workspace.exit_requested_at.is_not(None),
+                Workspace.exit_completed_at.is_(None),
+                Workspace.exit_read_until <= func.current_timestamp(),
+            )
+            .order_by(Workspace.exit_read_until, Workspace.id)
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if workspace is None:
+            session.rollback()
+            return None
+        set_workspace_exit_maintenance_scope(session, workspace.id)
+        set_workspace_management_scope(session, workspace.id)
+        set_work_access_cleanup_scope(session, workspace.id)
+
+        member_ids = list(
+            session.scalars(
+                select(WorkspaceMember.account_id)
+                .where(WorkspaceMember.workspace_id == workspace.id)
+                .order_by(WorkspaceMember.account_id)
+                .with_for_update()
+            )
+        )
+        list(
+            session.scalars(
+                select(WorkAccess)
+                .where(WorkAccess.workspace_id == workspace.id)
+                .order_by(WorkAccess.work_id, WorkAccess.account_id)
+                .with_for_update()
+            )
+        )
+        invitations = list(
+            session.scalars(
+                select(WorkspaceInvitation)
+                .where(
+                    WorkspaceInvitation.workspace_id == workspace.id,
+                    WorkspaceInvitation.status == "active",
+                )
+                .order_by(WorkspaceInvitation.id)
+                .with_for_update()
+            )
+        )
+        credential_ids = [invitation.credential_id for invitation in invitations]
+        credentials = _lock_credentials(session, credential_ids)
+        _lock_outboxes(session, credential_ids)
+        now = session.scalar(select(func.current_timestamp()))
+        if now is None:
+            raise WorkspaceOperationRetryable
+        for invitation in invitations:
+            invitation.status = "revoked"
+            invitation.revoked_at = now
+            credential = credentials.get(invitation.credential_id)
+            if credential is not None:
+                identity_service.revoke_workspace_invitation_credential(
+                    session, credential, now
+                )
+        clear_outbox_envelopes(session, credential_ids)
+        cancel_workspace_todos(session, workspace.id)
+        session.execute(
+            delete(WorkAccess).where(WorkAccess.workspace_id == workspace.id)
+        )
+        session.execute(
+            delete(WorkspaceMember).where(WorkspaceMember.workspace_id == workspace.id)
+        )
+        identity_service.revoke_sessions_for_accounts(
+            session, member_ids, "workspace_exit"
+        )
+        workspace.exit_completed_at = now
+        session.add(
+            SecurityAudit(
+                action="workspace_exit_completed",
+                scope=f"workspace:{workspace.id}",
+            )
+        )
+        _commit_or_rollback(session)
+    except SQLAlchemyError as error:
+        session.rollback()
+        raise WorkspaceOperationRetryable from error
+    except Exception:
+        session.rollback()
+        raise
+    return "completed"
 
 
 def diagnose_workspace(

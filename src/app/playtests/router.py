@@ -18,6 +18,7 @@ from app.identity.models import Account
 from app.identity.router import _bearer_token
 from app.issues import service as issues_service
 from app.playtests import service
+from app.workspaces import service as workspaces_service
 
 router = APIRouter(tags=["playtests"])
 
@@ -964,6 +965,10 @@ def _overview_error(error: Exception) -> None:
 
 
 def _playtest_error(error: Exception) -> None:
+    if isinstance(error, workspaces_service.WorkspaceExitInProgress):
+        raise api_error(
+            409, "工作空间正在退出", "workspace_exit_in_progress"
+        ) from error
     if isinstance(error, service.PlaytestRetestUnavailable):
         raise api_error(404, "复测问题不可用", "issue_unavailable") from error
     if isinstance(error, service.PlaytestRetestInvalid):

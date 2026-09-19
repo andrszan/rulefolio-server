@@ -13,6 +13,7 @@ from app.access.context import (
     set_notification_todo_source_scope,
     set_notification_todo_target_scope,
     set_notification_todo_work_cleanup_scope,
+    set_workspace_exit_maintenance_scope,
 )
 from app.core.config import settings
 from app.notifications.models import MailOutbox, NotificationTodo
@@ -323,6 +324,23 @@ def cancel_todos_for_target(
         _stop_todo_mail(session, todo.id)
 
 
+def cancel_workspace_todos(session: Session, workspace_id: UUID) -> None:
+    """退出收敛时取消该工作空间尚未完成的待办及尚未开始 SMTP 的邮件。"""
+    set_workspace_exit_maintenance_scope(session, workspace_id)
+    todos = session.scalars(
+        select(NotificationTodo)
+        .where(
+            NotificationTodo.workspace_id == workspace_id,
+            NotificationTodo.status == "open",
+        )
+        .with_for_update()
+    )
+    for todo in todos:
+        todo.status = "cancelled"
+        todo.resolved_at = _now()
+        _stop_todo_mail(session, todo.id)
+
+
 def complete_todos_for_target(
     session: Session,
     target_kind: str,
@@ -382,6 +400,9 @@ def complete_todo(
     if todo.status == "cancelled":
         session.rollback()
         raise NotificationTodoConflict("notification_todo_not_open")
+    from app.workspaces import service as workspaces_service
+
+    workspaces_service.ensure_workspace_writable(session, todo.workspace_id)
     if todo.status == "open":
         todo.status = "completed"
         todo.resolved_at = _now()
@@ -418,6 +439,9 @@ def retry_failed_mail(
     if todo.status != "open":
         session.rollback()
         raise NotificationTodoConflict("notification_todo_not_open")
+    from app.workspaces import service as workspaces_service
+
+    workspaces_service.ensure_workspace_writable(session, todo.workspace_id)
     if todo.retry_used:
         session.rollback()
         raise NotificationTodoConflict("notification_mail_retry_used")

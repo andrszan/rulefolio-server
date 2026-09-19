@@ -61,6 +61,74 @@ def test_create_workspace_returns_owner_contract(
         "name": "我的空间",
         "description": "说明",
         "isOwner": True,
+        "revision": 1,
+        "accessState": "active",
+        "readUntil": None,
+    }
+
+
+def test_workspace_exit_passes_password_revision_and_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    account = _account()
+    workspace_id = uuid4()
+    requested: list[tuple[str, int, datetime, str]] = []
+    _authorize(monkeypatch, account)
+
+    def request_exit(
+        _,
+        actor_id,
+        received_workspace_id,
+        password,
+        expected_revision,
+        read_until,
+        operation_key,
+    ) -> service.WorkspaceData:
+        assert actor_id == account.id
+        assert received_workspace_id == workspace_id
+        requested.append((password, expected_revision, read_until, operation_key))
+        return service.WorkspaceData(
+            workspace_id,
+            "我的空间",
+            None,
+            True,
+            revision=2,
+            access_state="exiting",
+            read_until=read_until,
+        )
+
+    monkeypatch.setattr(service, "request_workspace_exit", request_exit)
+    with TestClient(app) as client:
+        response = client.post(
+            f"/api/v1/workspaces/{workspace_id}/exit",
+            headers={
+                "Authorization": "Bearer session-token",
+                "Idempotency-Key": "workspace-exit-1",
+            },
+            json={
+                "password": "current-password",
+                "expectedRevision": 1,
+                "readUntil": "2030-01-01T00:00:00+08:00",
+            },
+        )
+
+    assert response.status_code == 200
+    assert requested == [
+        (
+            "current-password",
+            1,
+            datetime(2030, 1, 1, tzinfo=UTC) - timedelta(hours=8),
+            "workspace-exit-1",
+        )
+    ]
+    assert response.json()["data"] == {
+        "id": str(workspace_id),
+        "name": "我的空间",
+        "description": None,
+        "isOwner": True,
+        "revision": 2,
+        "accessState": "exiting",
+        "readUntil": "2030-01-01T00:00:00+08:00",
     }
 
 
@@ -138,6 +206,9 @@ def test_activation_retry_requires_login_without_replaying_session(
             "name": "协作空间",
             "description": None,
             "isOwner": False,
+            "revision": 1,
+            "accessState": "active",
+            "readUntil": None,
         },
     }
 

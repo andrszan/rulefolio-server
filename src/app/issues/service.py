@@ -176,9 +176,16 @@ def _values(
 
 
 def _require_management(
-    session: Session, actor_id: UUID, workspace_id: UUID, work_id: UUID
+    session: Session,
+    actor_id: UUID,
+    workspace_id: UUID,
+    work_id: UUID,
+    *,
+    writable: bool = False,
 ) -> None:
     set_actor(session, actor_id)
+    if writable:
+        workspaces_service.ensure_workspace_writable(session, workspace_id)
     try:
         works_service.ensure_work_management(session, actor_id, workspace_id, work_id)
     except works_service.WorkManagementForbidden as error:
@@ -633,7 +640,7 @@ def create_issue(
     if not operation_key or len(operation_key) > 128:
         raise IssueInvalid
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         _lock_work_for_creation(session, workspace_id, work_id)
         existing = session.scalar(
             select(Issue).where(
@@ -729,7 +736,7 @@ def update_issue(
     if expected_revision <= 0:
         raise IssueInvalid
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         issue = _load_issue(session, issue_id, lock=True)
         if issue.revision != expected_revision:
             session.rollback()
@@ -802,7 +809,7 @@ def bind_retest_session(
     if expected_revision <= 0:
         raise IssueInvalid
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         issue = _load_issue(session, issue_id, lock=True)
         if issue.revision != expected_revision:
             session.rollback()
@@ -914,7 +921,7 @@ def save_retest_conclusion(
     ):
         raise IssueInvalid
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         issue = _load_issue(session, issue_id, lock=True)
         if issue.revision != expected_revision:
             session.rollback()
@@ -1006,7 +1013,7 @@ def add_issue_evidence(
     if expected_revision <= 0:
         raise IssueInvalid
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         issue = _load_issue(session, issue_id, lock=True)
         if issue.revision != expected_revision:
             session.rollback()
@@ -1056,7 +1063,7 @@ def remove_issue_evidence(
     if expected_revision <= 0:
         raise IssueInvalid
     try:
-        _require_management(session, actor_id, workspace_id, work_id)
+        _require_management(session, actor_id, workspace_id, work_id, writable=True)
         issue = _load_issue(session, issue_id, lock=True)
         if issue.revision != expected_revision:
             session.rollback()

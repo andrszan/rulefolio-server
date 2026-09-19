@@ -34,6 +34,15 @@ class Workspace(Base):
         ForeignKey("identity_accounts.id", ondelete="RESTRICT"),
         nullable=False,
     )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    exit_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_read_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    exit_requested_by_account_id: Mapped[UUID | None] = mapped_column(
+        PostgreSQLUUID(as_uuid=True),
+        ForeignKey("identity_accounts.id", ondelete="RESTRICT"),
+    )
+    exit_operation_key: Mapped[str | None] = mapped_column(String(128))
+    exit_completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

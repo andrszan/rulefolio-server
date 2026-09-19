@@ -15,6 +15,7 @@ from app.identity import service as identity_service
 from app.identity.models import Account
 from app.identity.router import _bearer_token
 from app.issues import service
+from app.workspaces import service as workspaces_service
 
 router = APIRouter(tags=["issues"])
 
@@ -269,6 +270,10 @@ def _issue_evidence_response(
 
 
 def _issue_error(error: Exception) -> None:
+    if isinstance(error, workspaces_service.WorkspaceExitInProgress):
+        raise api_error(
+            409, "工作空间正在退出", "workspace_exit_in_progress"
+        ) from error
     if isinstance(error, service.IssueUnavailable):
         raise api_error(404, "问题内容不可用", "issue_unavailable") from error
     if isinstance(error, service.IssueManagementForbidden):

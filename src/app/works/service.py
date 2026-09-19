@@ -154,8 +154,10 @@ def _validate_work_values(
 
 
 def _require_workspace_member(
-    session: Session, workspace_id: UUID, account_id: UUID
+    session: Session, workspace_id: UUID, account_id: UUID, *, writable: bool = False
 ) -> None:
+    if writable:
+        workspaces_service.ensure_workspace_writable(session, workspace_id)
     if not workspaces_service.has_workspace_member(session, workspace_id, account_id):
         session.rollback()
         raise WorkspaceUnavailable
@@ -193,6 +195,7 @@ def _prepare_manager_write(
     actor_id: UUID,
     target_account_id: UUID | None = None,
 ) -> tuple[Work, list[workspaces_service.WorkAccessRecord]]:
+    workspaces_service.ensure_workspace_writable(session, workspace_id)
     work = _require_manager(session, workspace_id, work_id, actor_id)
     member_ids = workspaces_service.lock_work_members(
         session,
@@ -238,7 +241,7 @@ def create_work(
         estimated_duration_minutes,
     )
     try:
-        _require_workspace_member(session, workspace_id, actor_id)
+        _require_workspace_member(session, workspace_id, actor_id, writable=True)
         work = Work(
             id=uuid4(),
             workspace_id=workspace_id,

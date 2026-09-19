@@ -184,6 +184,7 @@ def test_current_rule_materials_use_stable_contract_and_revision(
                 display_name="规则书.pdf",
                 detected_content_type="application/pdf",
                 size_bytes=1024,
+                sha256="0" * 64,
                 created_at=datetime(2026, 9, 15, tzinfo=UTC),
             ),
         ),
