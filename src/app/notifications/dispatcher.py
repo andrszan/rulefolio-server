@@ -17,6 +17,8 @@ from app.core.config import settings
 from app.identity.models import Account, OneTimeCredential
 from app.notifications.models import MailOutbox, NotificationTodo
 from app.notifications.service import business_todo_eligible, decrypt_token
+from app.recovery.gate import dispatcher_allowed
+from app.recovery.models import RecoveryState
 from app.workspaces.models import WorkspaceInvitation
 
 
@@ -87,6 +89,10 @@ def _send(to_address: str, subject: str, body: str) -> None:
 
 
 def recover_stale_dispatches(session: Session) -> int:
+    if not dispatcher_allowed(session):
+        session.rollback()
+        return 0
+    session.rollback()
     cutoff = _now() - timedelta(minutes=settings.mail_dispatch_stale_minutes)
     outboxes = list(
         session.scalars(
@@ -187,6 +193,12 @@ def _start_smtp(session: Session, claim: DispatchClaim) -> bool:
             WorkspaceInvitation.status == "active",
         )
     )
+    recovery_open = exists(
+        select(RecoveryState.id).where(
+            RecoveryState.id == 1,
+            RecoveryState.stage == "open",
+        )
+    )
     result = session.execute(
         update(MailOutbox)
         .where(
@@ -194,6 +206,7 @@ def _start_smtp(session: Session, claim: DispatchClaim) -> bool:
             MailOutbox.status == "sending",
             MailOutbox.claim_id == claim.claim_id,
             MailOutbox.smtp_started_at.is_(None),
+            recovery_open,
             or_(MailOutbox.todo_id.is_(None), todo_open),
             or_(MailOutbox.credential_id.is_(None), credential_available),
             or_(
@@ -387,6 +400,10 @@ def _dispatch_one(session: Session) -> str | None:
 
 
 def dispatch_one(session: Session) -> str | None:
+    if not dispatcher_allowed(session):
+        session.rollback()
+        return None
+    session.rollback()
     try:
         return _dispatch_one(session)
     except SQLAlchemyError:

@@ -37,6 +37,7 @@ class Settings(BaseSettings):
     auth_attempt_window_minutes: int = Field(default=15, ge=1)
     login_max_attempts: int = Field(default=5, ge=1)
     recovery_request_max_attempts: int = Field(default=3, ge=1)
+    recovery_deployment_frozen: bool = False
     recovery_response_min_duration_ms: int = Field(default=250, ge=0)
     recovery_job_stale_minutes: int = Field(default=5, ge=1)
     recovery_exchange_max_attempts: int = Field(default=5, ge=1)

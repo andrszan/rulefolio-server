@@ -21,9 +21,13 @@ for name, value in {
 }.items():
     os.environ.setdefault(name, value)
 
-from app import health  # noqa: E402
+from app import health, mail_dispatcher, recovery_cli  # noqa: E402
 from app.api import router as api_router  # noqa: E402
+from app.core import middleware  # noqa: E402
 from app.core.database import engine, get_db  # noqa: E402
+from app.identity import service as identity_service  # noqa: E402
+from app.notifications import dispatcher  # noqa: E402
+from app.workspaces import service as workspace_service  # noqa: E402
 
 
 @api_router.get("/_test/versioned")
@@ -126,6 +130,7 @@ def test_database_url_and_settings() -> None:
     assert settings.api_prefix == "/api/v1"
     assert settings.enable_api_docs
     assert settings.log_level == "INFO"
+    assert not settings.recovery_deployment_frozen
     assert settings.cors_origins == ["https://example.com"]
     assert (
         Settings(
@@ -295,6 +300,183 @@ def test_error_cors_and_request_id_are_combined() -> None:
     }
     assert response.headers["X-Request-ID"] == "trace-456"
     assert response.headers["Access-Control-Allow-Origin"] == "https://example.com"
+
+
+def test_recovery_gate_returns_cors_envelope_and_request_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Session:
+        closed = False
+
+        def __enter__(self) -> "Session":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            self.closed = True
+
+    isolated_app = FastAPI()
+    register_exception_handlers(isolated_app)
+    register_middlewares(isolated_app, ["https://example.com"])
+    called = False
+
+    @isolated_app.get("/business")
+    def business() -> dict[str, str]:
+        nonlocal called
+        called = True
+        return {"status": "ok"}
+
+    session = Session()
+    monkeypatch.setattr(middleware, "SessionLocal", lambda: session)
+    monkeypatch.setattr(middleware, "api_requests_allowed", lambda _: False)
+    with TestClient(isolated_app) as client:
+        response = client.get(
+            "/business",
+            headers={"Origin": "https://example.com", "X-Request-ID": "trace-789"},
+        )
+
+    assert not called
+    assert session.closed
+    assert response.status_code == 503
+    assert response.json() == {
+        "code": 503,
+        "message": "服务正在恢复，请稍后重试",
+        "data": {"reason": "recovery_in_progress"},
+    }
+    assert response.headers["X-Request-ID"] == "trace-789"
+    assert response.headers["Access-Control-Allow-Origin"] == "https://example.com"
+
+
+def test_recovery_gate_does_not_access_probes(monkeypatch: pytest.MonkeyPatch) -> None:
+    isolated_app = FastAPI()
+    register_exception_handlers(isolated_app)
+    register_middlewares(isolated_app, [])
+
+    @isolated_app.get("/health")
+    def health_probe() -> dict[str, str]:
+        return {"status": "ok"}
+
+    @isolated_app.get("/ready")
+    def ready_probe() -> dict[str, str]:
+        return {"status": "ok"}
+
+    def fail_recovery_gate() -> None:
+        raise AssertionError("探针不应读取恢复门禁")
+
+    monkeypatch.setattr(middleware, "SessionLocal", fail_recovery_gate)
+    with TestClient(isolated_app) as client:
+        health_response = client.get("/health")
+        ready_response = client.get("/ready")
+
+    assert health_response.json() == {"status": "ok"}
+    assert ready_response.json() == {"status": "ok"}
+
+
+def test_mail_dispatcher_stops_when_recovery_gate_closed(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class Session:
+        closed = False
+
+        def __enter__(self) -> "Session":
+            return self
+
+        def __exit__(self, *_: object) -> None:
+            self.closed = True
+
+    def unexpected_action(*_: object) -> None:
+        raise AssertionError("恢复门禁关闭时不应处理后台任务")
+
+    session = Session()
+    monkeypatch.setattr(mail_dispatcher, "SessionLocal", lambda: session)
+    monkeypatch.setattr(mail_dispatcher, "dispatcher_allowed", lambda _: False)
+    monkeypatch.setattr(
+        mail_dispatcher, "recover_stale_recovery_request_jobs", unexpected_action
+    )
+    monkeypatch.setattr(mail_dispatcher, "recover_stale_dispatches", unexpected_action)
+    monkeypatch.setattr(
+        mail_dispatcher, "process_next_due_workspace_exit", unexpected_action
+    )
+    monkeypatch.setattr(
+        mail_dispatcher, "process_next_recovery_request", unexpected_action
+    )
+    monkeypatch.setattr(mail_dispatcher, "dispatch_one", unexpected_action)
+    monkeypatch.setattr(sys, "argv", ["mail_dispatcher"])
+
+    mail_dispatcher.main()
+
+    assert capsys.readouterr().out == "recovery_gate_closed\n"
+    assert session.closed
+
+
+def test_worker_services_stop_when_recovery_gate_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Session:
+        rollbacks = 0
+
+        def rollback(self) -> None:
+            self.rollbacks += 1
+
+    session = Session()
+    monkeypatch.setattr(identity_service, "dispatcher_allowed", lambda _: False)
+    monkeypatch.setattr(dispatcher, "dispatcher_allowed", lambda _: False)
+    monkeypatch.setattr(workspace_service, "dispatcher_allowed", lambda _: False)
+
+    assert identity_service.recover_stale_recovery_request_jobs(session) == 0
+    assert identity_service.process_next_recovery_request(session) is None
+    assert dispatcher.recover_stale_dispatches(session) == 0
+    assert dispatcher.dispatch_one(session) is None
+    assert workspace_service.process_next_due_workspace_exit(session) is None
+    assert session.rollbacks == 5
+
+
+def test_recovery_cli_hides_infrastructure_exception(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    class FailingLock:
+        def __enter__(self) -> None:
+            raise RuntimeError("不应泄露")
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    monkeypatch.setattr(recovery_cli, "locked_recovery_session", FailingLock)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "recovery_cli",
+            "recover",
+            "--recovery-id",
+            "recovery-001",
+            "--operator",
+            "pytest",
+            "--reason",
+            "基础设施失败演练",
+            "--manifest",
+            "manifest.json",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        recovery_cli.main()
+
+    assert error.value.code == 1
+    assert capsys.readouterr().out == (
+        '{"status": "failed", "phase": "infrastructure", "counts": {}}\n'
+    )
+
+
+def test_recovery_cli_only_exposes_restricted_recovery(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["recovery_cli", "recover", "--help"])
+
+    with pytest.raises(SystemExit) as result:
+        recovery_cli.main()
+
+    assert result.value.code == 0
+    assert "--authorization" not in capsys.readouterr().out
 
 
 def test_invalid_request_id_is_replaced() -> None:

@@ -51,6 +51,7 @@ API 文档默认位于：
 - `MIGRATOR_DB_*`：仅 Alembic 使用的 schema owner 身份；应用运行配置不得使用它。
 - `APP_*`、`API_PREFIX`、`ENABLE_API_DOCS`、`LOG_LEVEL`、`CORS_ORIGINS`：应用、文档、日志和前端联调设置。
 - `PASSWORD_*`、`ARGON2_*`、`SESSION_TTL_HOURS`、`ONE_TIME_TOKEN_TTL_MINUTES`、`*_MAX_ATTEMPTS`、`AUTH_ATTEMPT_*`、`RECOVERY_RESPONSE_MIN_DURATION_MS`、`RECOVERY_JOB_STALE_MINUTES`：服务端认证安全参数。
+- `RECOVERY_DEPLOYMENT_FROZEN`：恢复时由部署同时提供给 API、邮件派发和恢复 CLI 的门禁；默认 `false`，冻结时业务请求和后台派发均关闭。
 - `TOKEN_ENCRYPTION_KEY`、`AUTH_ATTEMPT_PEPPER`：恢复 token 信封和尝试主体摘要的受保护密钥，不能进入客户端或版本库。
 - `BASELINE_PASSWORD`：交付基线账号的受保护密码，不能通过命令参数、日志或客户端传入；账号交接信息见[项目准备清单](../docs/requirements/项目准备清单.md)。
 - `S3_*`：私有当前规则材料和作品图片的对象存储绑定。
@@ -100,6 +101,12 @@ uv run --locked python -m app.manage_project reset \
 uv run --locked python -m app.mail_dispatcher --once
 ```
 
+恢复期间保持 `RECOVERY_DEPLOYMENT_FROZEN=true`；恢复 CLI 的可用动作通过以下入口发现：
+
+```bash
+uv run --locked python -m app.recovery_cli --help
+```
+
 受控诊断只能按 Outbox 标识读取，并且必须写入操作者和理由审计：
 
 ```bash
@@ -121,8 +128,10 @@ src/app/
 ├── issues/                # 问题当前判断、来源关联与维护者专属 API
 ├── notifications/         # 个人待办、凭据与冻结业务邮件的 Outbox、SMTP adapter 与派发状态
 ├── playtests/             # 测试计划、场次快照、参与确认与受限材料读取
+├── recovery/              # 恢复状态、门禁、受限收敛与一致性核验
 ├── workspaces/            # 工作空间、成员、邀请、兑换与作品访问关系
 ├── works/                 # 私有作品、基础资料、当前规则材料与作品级访问服务
+├── recovery_cli.py        # 受控恢复、受限复核和派发重新开放命令
 ├── manage_identity.py     # 受控账户开通与 Outbox 诊断命令
 ├── manage_workspaces.py   # 受控工作空间诊断命令
 ├── manage_project.py      # 项目初始化与重置命令

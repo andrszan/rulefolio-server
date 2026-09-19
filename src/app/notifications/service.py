@@ -535,6 +535,29 @@ def list_todos(
     return [todo_data(session, todo) for todo in todos], total
 
 
+def suppress_for_restricted_recovery(session: Session) -> int:
+    result = session.execute(
+        update(MailOutbox)
+        .where(
+            or_(
+                MailOutbox.status.in_(("pending", "unknown")),
+                and_(
+                    MailOutbox.status == "sending",
+                    MailOutbox.smtp_started_at.is_(None),
+                ),
+            )
+        )
+        .values(
+            status="suppressed",
+            claim_id=None,
+            token_ciphertext=None,
+            token_nonce=None,
+            key_version=None,
+        )
+    )
+    return result.rowcount or 0
+
+
 def suppress_business_mails(session: Session, business_scope: str) -> None:
     """取消场次时只抑制尚未被 SMTP 领取的本场业务邮件。"""
     session.execute(

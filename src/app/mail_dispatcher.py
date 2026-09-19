@@ -6,6 +6,7 @@ from app.identity.service import (
     recover_stale_recovery_request_jobs,
 )
 from app.notifications.dispatcher import dispatch_one, recover_stale_dispatches
+from app.recovery.gate import dispatcher_allowed
 from app.workspaces.service import process_next_due_workspace_exit
 
 
@@ -17,6 +18,9 @@ def main() -> None:
     args = parser.parse_args()
 
     with SessionLocal() as session:
+        if not dispatcher_allowed(session):
+            print("recovery_gate_closed")
+            return
         recover_stale_recovery_request_jobs(session)
         recover_stale_dispatches(session)
         if args.once:

@@ -30,6 +30,7 @@ from app.notifications.service import (
     delete_work_access_todos,
     enqueue_token_mail,
 )
+from app.recovery.gate import dispatcher_allowed
 from app.workspaces.models import (
     WorkAccess,
     Workspace,
@@ -1464,6 +1465,10 @@ def request_workspace_exit(
 
 def process_next_due_workspace_exit(session: Session) -> str | None:
     """收敛一项到期退出；调用方负责轮询，不创建独立任务队列。"""
+    if not dispatcher_allowed(session):
+        session.rollback()
+        return None
+    session.rollback()
     try:
         set_workspace_exit_processor(session)
         workspace = session.scalar(

@@ -8,7 +8,9 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 
-from app.core.errors import unhandled_exception_handler
+from app.core.database import SessionLocal
+from app.core.errors import error_response, unhandled_exception_handler
+from app.recovery.gate import api_requests_allowed
 
 logger = logging.getLogger(__name__)
 REQUEST_ID_PATTERN = re.compile(r"[A-Za-z0-9._-]{1,128}\Z")
@@ -21,6 +23,22 @@ async def unexpected_exception_boundary(
         return await call_next(request)
     except Exception as exc:
         return await unhandled_exception_handler(request, exc)
+
+
+async def recovery_gate(
+    request: Request, call_next: Callable[[Request], Awaitable[Response]]
+) -> Response:
+    if request.url.path in {"/health", "/ready"}:
+        return await call_next(request)
+
+    with SessionLocal() as session:
+        if not api_requests_allowed(session):
+            return error_response(
+                503,
+                "服务正在恢复，请稍后重试",
+                {"reason": "recovery_in_progress"},
+            )
+    return await call_next(request)
 
 
 async def request_id_and_access_log(
@@ -46,6 +64,7 @@ async def request_id_and_access_log(
 
 
 def register_middlewares(app: FastAPI, cors_origins: list[str]) -> None:
+    app.middleware("http")(recovery_gate)
     app.middleware("http")(unexpected_exception_boundary)
     if cors_origins:
         app.add_middleware(

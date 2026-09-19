@@ -139,3 +139,9 @@ def set_project_baseline_scope(session: Session) -> None:
     session.execute(
         text("SELECT set_config('app.project_baseline_maintenance', 'active', true)")
     )
+
+
+def set_recovery_maintenance_scope(session: Session) -> None:
+    session.execute(
+        text("SELECT set_config('app.recovery_maintenance', 'active', true)")
+    )

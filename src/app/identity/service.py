@@ -27,6 +27,7 @@ from app.identity.models import (
 )
 from app.notifications.models import MailOutbox
 from app.notifications.service import clear_outbox_envelopes, enqueue_token_mail
+from app.recovery.gate import dispatcher_allowed
 
 ACTIVE = "active"
 PENDING_ACTIVATION = "pending_activation"
@@ -131,6 +132,27 @@ def revoke_sessions_for_accounts(
             )
             .values(revoked_at=_now(), revoke_reason=reason)
         )
+
+
+def revoke_for_restricted_recovery(session: Session) -> tuple[int, list[UUID]]:
+    now = _now()
+    sessions = (
+        session.execute(
+            update(SessionRecord)
+            .where(SessionRecord.revoked_at.is_(None))
+            .values(revoked_at=now, revoke_reason="recovery_restricted")
+        ).rowcount
+        or 0
+    )
+    credentials = list(
+        session.scalars(
+            update(OneTimeCredential)
+            .where(OneTimeCredential.status == TOKEN_ACTIVE)
+            .values(status=TOKEN_REVOKED, revoked_at=now)
+            .returning(OneTimeCredential.id)
+        )
+    )
+    return sessions, credentials
 
 
 def _password_hasher() -> PasswordHasher:
@@ -478,6 +500,10 @@ def _claim_recovery_request_job(session: Session) -> RecoveryRequestClaim | None
 
 
 def recover_stale_recovery_request_jobs(session: Session) -> int:
+    if not dispatcher_allowed(session):
+        session.rollback()
+        return 0
+    session.rollback()
     cutoff = _now() - timedelta(minutes=settings.recovery_job_stale_minutes)
     jobs = list(
         session.scalars(
@@ -521,6 +547,10 @@ def _finish_recovery_request_job(
 
 
 def process_next_recovery_request(session: Session) -> str | None:
+    if not dispatcher_allowed(session):
+        session.rollback()
+        return None
+    session.rollback()
     claim = _claim_recovery_request_job(session)
     if claim is None:
         return None
