@@ -1,0 +1,1 @@
+/opt/homebrew/Cellar/postgresql@14/14.15/bin/postgres "-D" "/Users/zhou/resource/fireworks/ANDRSZAN/pcm-products/rulefolio/.pcm/postgresql/data"

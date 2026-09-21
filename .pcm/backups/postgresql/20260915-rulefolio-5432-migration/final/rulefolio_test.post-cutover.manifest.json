@@ -1,0 +1,455 @@
+{
+  "database": "rulefolio_test",
+  "metadata": {
+    "version": "14.15 (Homebrew)",
+    "encoding": "UTF8",
+    "collate": "C",
+    "ctype": "C",
+    "alembic_revision": "20260915_03",
+    "extensions": [
+      "plpgsql"
+    ],
+    "rls": [
+      {
+        "table": "alembic_version",
+        "enabled": false,
+        "forced": false
+      },
+      {
+        "table": "identity_accounts",
+        "enabled": false,
+        "forced": false
+      },
+      {
+        "table": "identity_attempt_records",
+        "enabled": false,
+        "forced": false
+      },
+      {
+        "table": "identity_one_time_credentials",
+        "enabled": false,
+        "forced": false
+      },
+      {
+        "table": "identity_password_credentials",
+        "enabled": false,
+        "forced": false
+      },
+      {
+        "table": "identity_recovery_request_jobs",
+        "enabled": false,
+        "forced": false
+      },
+      {
+        "table": "identity_sessions",
+        "enabled": false,
+        "forced": false
+      },
+      {
+        "table": "mail_outbox",
+        "enabled": false,
+        "forced": false
+      },
+      {
+        "table": "security_audits",
+        "enabled": false,
+        "forced": false
+      },
+      {
+        "table": "work_accesses",
+        "enabled": true,
+        "forced": true
+      },
+      {
+        "table": "works",
+        "enabled": true,
+        "forced": true
+      },
+      {
+        "table": "workspace_invitation_attempts",
+        "enabled": true,
+        "forced": true
+      },
+      {
+        "table": "workspace_invitations",
+        "enabled": true,
+        "forced": true
+      },
+      {
+        "table": "workspace_members",
+        "enabled": true,
+        "forced": true
+      },
+      {
+        "table": "workspaces",
+        "enabled": true,
+        "forced": true
+      }
+    ],
+    "policies": [
+      {
+        "schema": "public",
+        "table": "work_accesses",
+        "name": "work_access_cleanup_lock",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "UPDATE",
+        "using": "(workspace_id = work_access_cleanup_workspace_id())",
+        "check": "false"
+      },
+      {
+        "schema": "public",
+        "table": "work_accesses",
+        "name": "work_access_delete",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "DELETE",
+        "using": "(((work_id = work_management_id()) AND (workspace_id = work_management_workspace_id())) OR (workspace_id = work_access_cleanup_workspace_id()))",
+        "check": null
+      },
+      {
+        "schema": "public",
+        "table": "work_accesses",
+        "name": "work_access_insert",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "INSERT",
+        "using": null,
+        "check": "((work_id = work_management_id()) AND (workspace_id = work_management_workspace_id()) AND (EXISTS ( SELECT 1\n   FROM workspace_members member\n  WHERE ((member.workspace_id = work_management_workspace_id()) AND (member.account_id = work_accesses.account_id)))))"
+      },
+      {
+        "schema": "public",
+        "table": "work_accesses",
+        "name": "work_access_read",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "SELECT",
+        "using": "((account_id = workspace_actor_id()) OR ((work_id = work_management_id()) AND (workspace_id = work_management_workspace_id())) OR (workspace_id = work_access_cleanup_workspace_id()))",
+        "check": null
+      },
+      {
+        "schema": "public",
+        "table": "work_accesses",
+        "name": "work_access_update",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "UPDATE",
+        "using": "((work_id = work_management_id()) AND (workspace_id = work_management_workspace_id()))",
+        "check": "((work_id = work_management_id()) AND (workspace_id = work_management_workspace_id()) AND (EXISTS ( SELECT 1\n   FROM workspace_members member\n  WHERE ((member.workspace_id = work_management_workspace_id()) AND (member.account_id = work_accesses.account_id)))))"
+      },
+      {
+        "schema": "public",
+        "table": "works",
+        "name": "work_insert",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "INSERT",
+        "using": null,
+        "check": "(EXISTS ( SELECT 1\n   FROM workspace_members member\n  WHERE ((member.workspace_id = works.workspace_id) AND (member.account_id = workspace_actor_id()))))"
+      },
+      {
+        "schema": "public",
+        "table": "works",
+        "name": "work_read",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "SELECT",
+        "using": "(((EXISTS ( SELECT 1\n   FROM workspace_members member\n  WHERE ((member.workspace_id = works.workspace_id) AND (member.account_id = workspace_actor_id())))) AND (EXISTS ( SELECT 1\n   FROM work_accesses access\n  WHERE ((access.work_id = works.id) AND (access.account_id = workspace_actor_id()))))) OR ((id = work_management_id()) AND (EXISTS ( SELECT 1\n   FROM workspace_members member\n  WHERE ((member.workspace_id = works.workspace_id) AND (member.account_id = workspace_actor_id()))))))",
+        "check": null
+      },
+      {
+        "schema": "public",
+        "table": "works",
+        "name": "work_update",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "UPDATE",
+        "using": "((id = work_management_id()) AND (EXISTS ( SELECT 1\n   FROM workspace_members member\n  WHERE ((member.workspace_id = works.workspace_id) AND (member.account_id = workspace_actor_id())))) AND (EXISTS ( SELECT 1\n   FROM work_accesses access\n  WHERE ((access.work_id = works.id) AND (access.account_id = workspace_actor_id()) AND ((access.role)::text = 'maintainer'::text)))))",
+        "check": "((id = work_management_id()) AND (EXISTS ( SELECT 1\n   FROM workspace_members member\n  WHERE ((member.workspace_id = works.workspace_id) AND (member.account_id = workspace_actor_id())))) AND (EXISTS ( SELECT 1\n   FROM work_accesses access\n  WHERE ((access.work_id = works.id) AND (access.account_id = workspace_actor_id()) AND ((access.role)::text = 'maintainer'::text)))))"
+      },
+      {
+        "schema": "public",
+        "table": "workspace_invitation_attempts",
+        "name": "workspace_invitation_attempt_access",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "ALL",
+        "using": "true",
+        "check": "true"
+      },
+      {
+        "schema": "public",
+        "table": "workspace_invitations",
+        "name": "workspace_invitation_insert",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "INSERT",
+        "using": null,
+        "check": "(workspace_id = workspace_management_id())"
+      },
+      {
+        "schema": "public",
+        "table": "workspace_invitations",
+        "name": "workspace_invitation_read",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "SELECT",
+        "using": "((workspace_id = workspace_management_id()) OR (workspace_id = workspace_maintenance_id()) OR (credential_id = workspace_invitation_credential_id()))",
+        "check": null
+      },
+      {
+        "schema": "public",
+        "table": "workspace_invitations",
+        "name": "workspace_invitation_update",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "UPDATE",
+        "using": "((workspace_id = workspace_management_id()) OR (credential_id = workspace_invitation_credential_id()))",
+        "check": "((workspace_id = workspace_management_id()) OR (credential_id = workspace_invitation_credential_id()))"
+      },
+      {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "workspace_member_delete",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "DELETE",
+        "using": "(workspace_id = workspace_management_id())",
+        "check": null
+      },
+      {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "workspace_member_insert",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "INSERT",
+        "using": null,
+        "check": "((workspace_id = workspace_management_id()) OR (EXISTS ( SELECT 1\n   FROM workspace_invitations invitation\n  WHERE ((invitation.workspace_id = workspace_members.workspace_id) AND (invitation.account_id = workspace_members.account_id) AND (invitation.credential_id = workspace_invitation_credential_id()) AND ((invitation.status)::text = 'active'::text)))))"
+      },
+      {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "workspace_member_read",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "SELECT",
+        "using": "((account_id = workspace_actor_id()) OR (workspace_id = workspace_management_id()) OR (workspace_id = workspace_maintenance_id()))",
+        "check": null
+      },
+      {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "workspace_member_update",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "UPDATE",
+        "using": "(workspace_id = workspace_management_id())",
+        "check": "(workspace_id = workspace_management_id())"
+      },
+      {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "workspace_member_work_management_lock",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "UPDATE",
+        "using": "(workspace_id = work_management_workspace_id())",
+        "check": "false"
+      },
+      {
+        "schema": "public",
+        "table": "workspace_members",
+        "name": "workspace_member_work_management_read",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "SELECT",
+        "using": "(workspace_id = work_management_workspace_id())",
+        "check": null
+      },
+      {
+        "schema": "public",
+        "table": "workspaces",
+        "name": "workspace_insert",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "INSERT",
+        "using": null,
+        "check": "(owner_account_id = workspace_actor_id())"
+      },
+      {
+        "schema": "public",
+        "table": "workspaces",
+        "name": "workspace_read",
+        "permissive": "PERMISSIVE",
+        "roles": [
+          "public"
+        ],
+        "command": "SELECT",
+        "using": "((owner_account_id = workspace_actor_id()) OR (id = workspace_maintenance_id()) OR (EXISTS ( SELECT 1\n   FROM workspace_members member\n  WHERE ((member.workspace_id = workspaces.id) AND (member.account_id = workspace_actor_id())))) OR (EXISTS ( SELECT 1\n   FROM workspace_invitations invitation\n  WHERE ((invitation.workspace_id = workspaces.id) AND (invitation.credential_id = workspace_invitation_credential_id())))))",
+        "check": null
+      }
+    ]
+  },
+  "tables": [
+    {
+      "table": "alembic_version",
+      "primary_key": [
+        "version_num"
+      ],
+      "row_count": 1,
+      "sha256": "05a5eba88654c16ac8c8a9a28f763c2693d0efc3d0d3251d5bcda9c48cfd8004"
+    },
+    {
+      "table": "identity_accounts",
+      "primary_key": [
+        "id"
+      ],
+      "row_count": 213,
+      "sha256": "bd2e7730b0052bdd7b0bd2cbaec0887395d1309b1a02ff783af7eeeaad386590"
+    },
+    {
+      "table": "identity_attempt_records",
+      "primary_key": [
+        "id"
+      ],
+      "row_count": 1,
+      "sha256": "f9eae9bf7bb45cfc433323009cff643e9ec23f903e8704bd78033a088179b637"
+    },
+    {
+      "table": "identity_one_time_credentials",
+      "primary_key": [
+        "id"
+      ],
+      "row_count": 77,
+      "sha256": "1a2a6028abf5167bf17c070e5ab1a2a1107a7971e98f38bcac371db202855f03"
+    },
+    {
+      "table": "identity_password_credentials",
+      "primary_key": [
+        "account_id"
+      ],
+      "row_count": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "table": "identity_recovery_request_jobs",
+      "primary_key": [
+        "id"
+      ],
+      "row_count": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "table": "identity_sessions",
+      "primary_key": [
+        "id"
+      ],
+      "row_count": 0,
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "table": "mail_outbox",
+      "primary_key": [
+        "id"
+      ],
+      "row_count": 66,
+      "sha256": "f0a6f8d6da046dafe6b03eaf4018d49675d5e71b68c69479b533634ca35ad82c"
+    },
+    {
+      "table": "security_audits",
+      "primary_key": [
+        "id"
+      ],
+      "row_count": 467,
+      "sha256": "f825154ecaea428ca20db7ca8d8eb7ebc7b16c56e81102e57fbdbf29c13f8f3c"
+    },
+    {
+      "table": "work_accesses",
+      "primary_key": [
+        "work_id",
+        "account_id"
+      ],
+      "row_count": 28,
+      "sha256": "04915ff109b7513b19b399abf640b61e048ccbafbdfa9c8a1b11c5627ec95c43"
+    },
+    {
+      "table": "works",
+      "primary_key": [
+        "id"
+      ],
+      "row_count": 24,
+      "sha256": "62e15b955f524a4993c36ee1898ec5cde2cc2db2a1e10942032e172ce7c34637"
+    },
+    {
+      "table": "workspace_invitation_attempts",
+      "primary_key": [
+        "id"
+      ],
+      "row_count": 33,
+      "sha256": "0de89af08a4d5b53ea6f6ff1b0cf87df3fca2c37922fd8901f9537a30414db04"
+    },
+    {
+      "table": "workspace_invitations",
+      "primary_key": [
+        "id"
+      ],
+      "row_count": 66,
+      "sha256": "3803c21980b117c5a7048b9fce9b8ea077f9e19215c9397f9cf6b3ccf238dd8b"
+    },
+    {
+      "table": "workspace_members",
+      "primary_key": [
+        "id"
+      ],
+      "row_count": 155,
+      "sha256": "f645e4e29fe6b990b1c416974fc34953b883f2848493b57ca70b3ed260225672"
+    },
+    {
+      "table": "workspaces",
+      "primary_key": [
+        "id"
+      ],
+      "row_count": 104,
+      "sha256": "770cfbe0c5a3157b1c97e33a082241f086b9ea825a7222d6d978015f055609c7"
+    }
+  ]
+}

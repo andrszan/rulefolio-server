@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "product_key": "25616e530eac9a6cdc56418d223496565fe1d81ebfb8f78ea9402a155ea1d35e",
+  "owner_run_id": "rulefolio-20260914",
+  "host": "127.0.0.1",
+  "services": {
+    "frontend": {
+      "port": 3105,
+      "url": "http://127.0.0.1:3105"
+    },
+    "backend": {
+      "port": 8105,
+      "url": "http://127.0.0.1:8105"
+    }
+  }
+}

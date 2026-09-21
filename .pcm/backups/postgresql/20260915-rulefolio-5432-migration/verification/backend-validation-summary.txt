@@ -1,0 +1,34 @@
+Rulefolio PostgreSQL 5432 迁移验证摘要
+
+执行日期：2026-09-15
+
+后端与迁移：
+- uv run --locked alembic current：20260915_03 (head)
+- uv run --locked ruff check .：通过
+- uv run --locked ruff format --check .：48 files already formatted
+- 使用完整 DB_* 且 DB_NAME=rulefolio_test 的 uv run --locked pytest：36 passed，0 skipped
+- uv build：wheel 与 sdist 构建成功
+- MIGRATOR_DB_NAME=rulefolio_test 的 alembic upgrade head：通过
+- rulefolio_migrator 事务性 CREATE/DROP TABLE 能力探针：通过，回滚后无残留对象
+
+数据与恢复：
+- 迁移前备份、围栏后 final 备份、切换后 post-cutover 备份均已生成 custom archive、TOC、manifest 和 SHA-256。
+- 迁移前与 post-cutover 两组归档均已在 5432 临时数据库真实恢复；开发库、测试库逐表行数和按主键排序的数据 SHA-256 与来源完全一致。
+- 正式迁移时开发库、测试库均为 15 张表，Alembic revision 为 20260915_03；6 张表启用并强制 RLS，共 20 条 policy。
+
+权限与认证：
+- rulefolio_owner 为 NOLOGIN database owner；rulefolio_migrator 持有 public schema、表、索引和函数；角色之间无 membership。
+- rulefolio_app 无 database/schema CREATE、对象 ownership、BYPASSRLS 和 alembic_version 权限；表、列与函数有效权限和源端矩阵一致。
+- app/migrator 通过 Unix socket、IPv4、IPv6 连接 Rulefolio 两库均强制 SCRAM；无密码、错误密码和连接 postgres/pcm 均失败。
+- pg_hba_file_rules 无解析错误，共享 5432 仅 reload，未重启。
+
+应用与浏览器：
+- API /health、/ready 成功，pg_stat_activity 确认 rulefolio_app 实际连接 5432；5436 无消费者。
+- 既有开发账号真实登录成功；可读取雾林桌游工作室及月港谜雾、石桥远行两项现有作品；桌面与窄屏页面均完成截图检查；退出成功。
+- 浏览器验收产生的新 session 与 security audit 仅写入 5432，旧 5436 数据未变化；定位重试提前终止留下的 3 个验收 session 已按明确时间窗口标记为 migration_validation_cleanup，未删除安全审计。
+- app.mail_dispatcher --once 返回 empty，没有重放 accepted/cancelled 终态 Outbox。
+
+退出：
+- 临时恢复数据库均已删除。
+- 本次启动的 API 与前端开发服务均已停止，8105 与 3105 已释放。
+- 旧 5436 实例已 fast shutdown，5436 已释放；共享 5432 继续 accepting connections。

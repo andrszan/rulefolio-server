@@ -1,0 +1,27 @@
+--
+-- PostgreSQL database cluster dump
+--
+
+SET default_transaction_read_only = off;
+
+SET client_encoding = 'UTF8';
+SET standard_conforming_strings = on;
+
+--
+-- Roles
+--
+
+CREATE ROLE rulefolio_admin;
+ALTER ROLE rulefolio_admin WITH SUPERUSER INHERIT CREATEROLE CREATEDB LOGIN REPLICATION BYPASSRLS PASSWORD 'SCRAM-SHA-256$4096:DbKkzwgSKJn29nSew+dgCg==$rX9UeWP2zKdJpjP6e6LpM/2Q3DNS6sCAfN6KAJb6zvQ=:VwiON+Hpi/Hgt/9vWg6IOTgjtWSJLL5SzQtIodzmxBo=';
+CREATE ROLE rulefolio_app;
+ALTER ROLE rulefolio_app WITH NOSUPERUSER INHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION NOBYPASSRLS PASSWORD 'SCRAM-SHA-256$4096:9C7wBKMxFlueWVEjT360ig==$nof9a5J7sL5s9AJNZGNnq/rNKbWiYyJ31yjhhcCUDnk=:1j03qsVHnrXBssSaDtM+NQe3qbWqTQGLjK+6JKYt69w=';
+CREATE ROLE rulefolio_migrator;
+ALTER ROLE rulefolio_migrator WITH NOSUPERUSER NOINHERIT NOCREATEROLE NOCREATEDB LOGIN NOREPLICATION NOBYPASSRLS PASSWORD 'SCRAM-SHA-256$4096:+5LvlbtpoM92m0HVINqK2w==$jkIB1fvClAf0o/NU+2Ef18fo+MwH/j3Nr19w5LSeR7E=:gGGF7DwGqEslKwNYiL+d2qlXZkn8kSkZYn7FlScm3Lc=';
+
+
+
+
+--
+-- PostgreSQL database cluster dump complete
+--
+

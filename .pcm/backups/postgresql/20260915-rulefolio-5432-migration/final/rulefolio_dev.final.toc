@@ -1,0 +1,158 @@
+;
+; Archive created at 2026-09-15 08:30:14 CST
+;     dbname: rulefolio_dev
+;     TOC Entries: 149
+;     Compression: -1
+;     Dump Version: 1.14-0
+;     Format: CUSTOM
+;     Integer: 4 bytes
+;     Offset: 8 bytes
+;     Dumped from database version: 14.15 (Homebrew)
+;     Dumped by pg_dump version: 14.15 (Homebrew)
+;
+;
+; Selected TOC Entries:
+;
+3869; 0 0 ACL - SCHEMA public rulefolio_migrator
+230; 1255 17521 FUNCTION public work_access_cleanup_workspace_id() rulefolio_migrator
+3870; 0 0 ACL public FUNCTION work_access_cleanup_workspace_id() rulefolio_migrator
+228; 1255 17519 FUNCTION public work_management_id() rulefolio_migrator
+3871; 0 0 ACL public FUNCTION work_management_id() rulefolio_migrator
+229; 1255 17520 FUNCTION public work_management_workspace_id() rulefolio_migrator
+3872; 0 0 ACL public FUNCTION work_management_workspace_id() rulefolio_migrator
+224; 1255 17198 FUNCTION public workspace_actor_id() rulefolio_migrator
+3873; 0 0 ACL public FUNCTION workspace_actor_id() rulefolio_migrator
+225; 1255 17199 FUNCTION public workspace_invitation_credential_id() rulefolio_migrator
+3874; 0 0 ACL public FUNCTION workspace_invitation_credential_id() rulefolio_migrator
+227; 1255 17201 FUNCTION public workspace_maintenance_id() rulefolio_migrator
+3875; 0 0 ACL public FUNCTION workspace_maintenance_id() rulefolio_migrator
+226; 1255 17200 FUNCTION public workspace_management_id() rulefolio_migrator
+3876; 0 0 ACL public FUNCTION workspace_management_id() rulefolio_migrator
+209; 1259 16415 TABLE public alembic_version rulefolio_migrator
+210; 1259 16761 TABLE public identity_accounts rulefolio_migrator
+3877; 0 0 ACL public TABLE identity_accounts rulefolio_migrator
+214; 1259 16819 TABLE public identity_attempt_records rulefolio_migrator
+3878; 0 0 ACL public TABLE identity_attempt_records rulefolio_migrator
+213; 1259 16800 TABLE public identity_one_time_credentials rulefolio_migrator
+3879; 0 0 ACL public TABLE identity_one_time_credentials rulefolio_migrator
+211; 1259 16771 TABLE public identity_password_credentials rulefolio_migrator
+3880; 0 0 ACL public TABLE identity_password_credentials rulefolio_migrator
+215; 1259 16829 TABLE public identity_recovery_request_jobs rulefolio_migrator
+3881; 0 0 ACL public TABLE identity_recovery_request_jobs rulefolio_migrator
+212; 1259 16784 TABLE public identity_sessions rulefolio_migrator
+3882; 0 0 ACL public TABLE identity_sessions rulefolio_migrator
+217; 1259 16847 TABLE public mail_outbox rulefolio_migrator
+3883; 0 0 ACL public TABLE mail_outbox rulefolio_migrator
+216; 1259 16839 TABLE public security_audits rulefolio_migrator
+3884; 0 0 ACL public TABLE security_audits rulefolio_migrator
+223; 1259 17501 TABLE public work_accesses rulefolio_migrator
+3885; 0 0 ACL public TABLE work_accesses rulefolio_migrator
+3886; 0 0 ACL public COLUMN work_accesses.role rulefolio_migrator
+222; 1259 17479 TABLE public works rulefolio_migrator
+3887; 0 0 ACL public TABLE works rulefolio_migrator
+3888; 0 0 ACL public COLUMN works.name rulefolio_migrator
+3889; 0 0 ACL public COLUMN works.description rulefolio_migrator
+3890; 0 0 ACL public COLUMN works.creative_stage rulefolio_migrator
+3891; 0 0 ACL public COLUMN works.target_experience rulefolio_migrator
+3892; 0 0 ACL public COLUMN works.min_players rulefolio_migrator
+3893; 0 0 ACL public COLUMN works.max_players rulefolio_migrator
+3894; 0 0 ACL public COLUMN works.estimated_duration_minutes rulefolio_migrator
+3895; 0 0 ACL public COLUMN works.revision rulefolio_migrator
+3896; 0 0 ACL public COLUMN works.updated_at rulefolio_migrator
+221; 1259 17188 TABLE public workspace_invitation_attempts rulefolio_migrator
+3897; 0 0 ACL public TABLE workspace_invitation_attempts rulefolio_migrator
+220; 1259 17162 TABLE public workspace_invitations rulefolio_migrator
+3898; 0 0 ACL public TABLE workspace_invitations rulefolio_migrator
+219; 1259 17143 TABLE public workspace_members rulefolio_migrator
+3899; 0 0 ACL public TABLE workspace_members rulefolio_migrator
+218; 1259 17130 TABLE public workspaces rulefolio_migrator
+3900; 0 0 ACL public TABLE workspaces rulefolio_migrator
+3846; 0 16415 TABLE DATA public alembic_version rulefolio_migrator
+3847; 0 16761 TABLE DATA public identity_accounts rulefolio_migrator
+3851; 0 16819 TABLE DATA public identity_attempt_records rulefolio_migrator
+3850; 0 16800 TABLE DATA public identity_one_time_credentials rulefolio_migrator
+3848; 0 16771 TABLE DATA public identity_password_credentials rulefolio_migrator
+3852; 0 16829 TABLE DATA public identity_recovery_request_jobs rulefolio_migrator
+3849; 0 16784 TABLE DATA public identity_sessions rulefolio_migrator
+3854; 0 16847 TABLE DATA public mail_outbox rulefolio_migrator
+3853; 0 16839 TABLE DATA public security_audits rulefolio_migrator
+3860; 0 17501 TABLE DATA public work_accesses rulefolio_migrator
+3859; 0 17479 TABLE DATA public works rulefolio_migrator
+3858; 0 17188 TABLE DATA public workspace_invitation_attempts rulefolio_migrator
+3857; 0 17162 TABLE DATA public workspace_invitations rulefolio_migrator
+3856; 0 17143 TABLE DATA public workspace_members rulefolio_migrator
+3855; 0 17130 TABLE DATA public workspaces rulefolio_migrator
+3610; 2606 16419 CONSTRAINT public alembic_version alembic_version_pkc rulefolio_migrator
+3612; 2606 16770 CONSTRAINT public identity_accounts identity_accounts_email_key rulefolio_migrator
+3614; 2606 16768 CONSTRAINT public identity_accounts identity_accounts_pkey rulefolio_migrator
+3629; 2606 16826 CONSTRAINT public identity_attempt_records identity_attempt_records_pkey rulefolio_migrator
+3623; 2606 16809 CONSTRAINT public identity_one_time_credentials identity_one_time_credentials_pkey rulefolio_migrator
+3625; 2606 16811 CONSTRAINT public identity_one_time_credentials identity_one_time_credentials_token_hash_key rulefolio_migrator
+3616; 2606 16778 CONSTRAINT public identity_password_credentials identity_password_credentials_pkey rulefolio_migrator
+3633; 2606 16837 CONSTRAINT public identity_recovery_request_jobs identity_recovery_request_jobs_pkey rulefolio_migrator
+3618; 2606 16791 CONSTRAINT public identity_sessions identity_sessions_pkey rulefolio_migrator
+3620; 2606 16793 CONSTRAINT public identity_sessions identity_sessions_token_hash_key rulefolio_migrator
+3639; 2606 16860 CONSTRAINT public mail_outbox mail_outbox_credential_id_key rulefolio_migrator
+3641; 2606 16858 CONSTRAINT public mail_outbox mail_outbox_pkey rulefolio_migrator
+3636; 2606 16846 CONSTRAINT public security_audits security_audits_pkey rulefolio_migrator
+3631; 2606 16828 CONSTRAINT public identity_attempt_records uq_identity_attempt_subject rulefolio_migrator
+3661; 2606 17494 CONSTRAINT public works uq_work_id_workspace rulefolio_migrator
+3656; 2606 17197 CONSTRAINT public workspace_invitation_attempts uq_workspace_invitation_attempt_subject rulefolio_migrator
+3646; 2606 17150 CONSTRAINT public workspace_members uq_workspace_member rulefolio_migrator
+3666; 2606 17507 CONSTRAINT public work_accesses work_accesses_pkey rulefolio_migrator
+3663; 2606 17492 CONSTRAINT public works works_pkey rulefolio_migrator
+3658; 2606 17195 CONSTRAINT public workspace_invitation_attempts workspace_invitation_attempts_pkey rulefolio_migrator
+3652; 2606 17170 CONSTRAINT public workspace_invitations workspace_invitations_credential_id_key rulefolio_migrator
+3654; 2606 17168 CONSTRAINT public workspace_invitations workspace_invitations_pkey rulefolio_migrator
+3648; 2606 17148 CONSTRAINT public workspace_members workspace_members_pkey rulefolio_migrator
+3643; 2606 17137 CONSTRAINT public workspaces workspaces_pkey rulefolio_migrator
+3626; 1259 16817 INDEX public ix_identity_credential_account rulefolio_migrator
+3634; 1259 16838 INDEX public ix_identity_recovery_job_claim rulefolio_migrator
+3621; 1259 16799 INDEX public ix_identity_sessions_account rulefolio_migrator
+3637; 1259 16871 INDEX public ix_mail_outbox_dispatch rulefolio_migrator
+3664; 1259 17518 INDEX public ix_work_accesses_account_work rulefolio_migrator
+3659; 1259 17500 INDEX public ix_works_workspace_created rulefolio_migrator
+3649; 1259 17187 INDEX public ix_workspace_invitations_workspace rulefolio_migrator
+3644; 1259 17161 INDEX public ix_workspace_members_account rulefolio_migrator
+3627; 1259 17129 INDEX public uq_identity_active_credential_per_purpose rulefolio_migrator
+3650; 1259 17186 INDEX public uq_workspace_active_invitation rulefolio_migrator
+3669; 2606 16812 FK CONSTRAINT public identity_one_time_credentials identity_one_time_credentials_account_id_fkey rulefolio_migrator
+3667; 2606 16779 FK CONSTRAINT public identity_password_credentials identity_password_credentials_account_id_fkey rulefolio_migrator
+3668; 2606 16794 FK CONSTRAINT public identity_sessions identity_sessions_account_id_fkey rulefolio_migrator
+3670; 2606 16861 FK CONSTRAINT public mail_outbox mail_outbox_credential_id_fkey rulefolio_migrator
+3671; 2606 16866 FK CONSTRAINT public mail_outbox mail_outbox_recipient_account_id_fkey rulefolio_migrator
+3679; 2606 17508 FK CONSTRAINT public work_accesses work_accesses_account_id_fkey rulefolio_migrator
+3680; 2606 17513 FK CONSTRAINT public work_accesses work_accesses_work_id_workspace_id_fkey rulefolio_migrator
+3678; 2606 17495 FK CONSTRAINT public works works_workspace_id_fkey rulefolio_migrator
+3675; 2606 17171 FK CONSTRAINT public workspace_invitations workspace_invitations_account_id_fkey rulefolio_migrator
+3676; 2606 17176 FK CONSTRAINT public workspace_invitations workspace_invitations_credential_id_fkey rulefolio_migrator
+3677; 2606 17181 FK CONSTRAINT public workspace_invitations workspace_invitations_workspace_id_fkey rulefolio_migrator
+3673; 2606 17151 FK CONSTRAINT public workspace_members workspace_members_account_id_fkey rulefolio_migrator
+3674; 2606 17156 FK CONSTRAINT public workspace_members workspace_members_workspace_id_fkey rulefolio_migrator
+3672; 2606 17138 FK CONSTRAINT public workspaces workspaces_owner_account_id_fkey rulefolio_migrator
+3843; 3256 17530 POLICY public work_accesses work_access_cleanup_lock rulefolio_migrator
+3842; 3256 17529 POLICY public work_accesses work_access_delete rulefolio_migrator
+3840; 3256 17527 POLICY public work_accesses work_access_insert rulefolio_migrator
+3839; 3256 17526 POLICY public work_accesses work_access_read rulefolio_migrator
+3841; 3256 17528 POLICY public work_accesses work_access_update rulefolio_migrator
+3825; 0 17501 ROW SECURITY public work_accesses rulefolio_migrator
+3837; 3256 17523 POLICY public works work_insert rulefolio_migrator
+3836; 3256 17522 POLICY public works work_read rulefolio_migrator
+3838; 3256 17524 POLICY public works work_update rulefolio_migrator
+3824; 0 17479 ROW SECURITY public works rulefolio_migrator
+3827; 3256 17203 POLICY public workspaces workspace_insert rulefolio_migrator
+3835; 3256 17211 POLICY public workspace_invitation_attempts workspace_invitation_attempt_access rulefolio_migrator
+3823; 0 17188 ROW SECURITY public workspace_invitation_attempts rulefolio_migrator
+3833; 3256 17209 POLICY public workspace_invitations workspace_invitation_insert rulefolio_migrator
+3832; 3256 17208 POLICY public workspace_invitations workspace_invitation_read rulefolio_migrator
+3834; 3256 17210 POLICY public workspace_invitations workspace_invitation_update rulefolio_migrator
+3822; 0 17162 ROW SECURITY public workspace_invitations rulefolio_migrator
+3831; 3256 17207 POLICY public workspace_members workspace_member_delete rulefolio_migrator
+3829; 3256 17205 POLICY public workspace_members workspace_member_insert rulefolio_migrator
+3828; 3256 17204 POLICY public workspace_members workspace_member_read rulefolio_migrator
+3830; 3256 17206 POLICY public workspace_members workspace_member_update rulefolio_migrator
+3845; 3256 17532 POLICY public workspace_members workspace_member_work_management_lock rulefolio_migrator
+3844; 3256 17531 POLICY public workspace_members workspace_member_work_management_read rulefolio_migrator
+3821; 0 17143 ROW SECURITY public workspace_members rulefolio_migrator
+3826; 3256 17202 POLICY public workspaces workspace_read rulefolio_migrator
+3820; 0 17130 ROW SECURITY public workspaces rulefolio_migrator

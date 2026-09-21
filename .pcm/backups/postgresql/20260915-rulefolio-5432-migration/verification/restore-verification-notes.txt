@@ -1,0 +1,8 @@
+预恢复验证记录
+
+- 预备份：开发库、测试库均已生成 custom archive、TOC、schema-only dump、角色参考、SHA-256 和逐表数据摘要。
+- 首次恢复使用 archive ACL 时，schema ACL 引用了旧实例专属的 rulefolio_admin，恢复报告 ACL 错误。未在共享实例创建该角色。
+- 已删除并重建本任务专属验证库，改用 --no-owner --no-acl --role=rulefolio_migrator 恢复，再按现有 Alembic revision 和源端有效权限矩阵显式应用 ACL。
+- 开发库、测试库的逐表行数、逐表 SHA-256、Alembic revision、extension、RLS/FORCE RLS 和 policy 清单完全一致。
+- 应用身份在所有表、列和函数上的有效权限与源端一致。
+- schema-only 文本 diff 仅出现 PostgreSQL 对 CHECK 约束与 partial index 中 ARRAY/cast 表达式的等价重新反解析形式；对象名称、约束、索引、policy 和数据均已恢复，后续仍以真实 PostgreSQL 集成测试验证行为。

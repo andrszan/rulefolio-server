@@ -1,0 +1,4 @@
+database|rulefolio_dev|-1
+database|rulefolio_test|-1
+role|rulefolio_app|true
+role|rulefolio_migrator|true
